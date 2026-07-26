@@ -6,10 +6,15 @@ import type { InboundContent } from '../webhooks/payloads.js'
 import { nullTransport } from '../webhooks/transport.js'
 import type { WebhookTransport } from '../webhooks/transport.js'
 import { VirtualClock } from './clock.js'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 
+import { buildQualityUpdatePayload, buildTemplateStatusPayload } from '../webhooks/tech-payloads.js'
 import { makeFbtraceId, makeMediaId, makeWamid } from './ids.js'
-import { normalizeWaId } from './phone.js'
+import { MessagingLimits, TIER_CAPS } from './limits.js'
+import { normalizeWaId, toDisplayPhoneNumber } from './phone.js'
+import { TokenStore } from './tokens.js'
+import type { DebugTokenData } from './tokens.js'
+import type { MessagingTier, QualityRating } from './types.js'
 import { Conversations } from './conversations.js'
 import type { ConversationCategory } from './conversations.js'
 import { ScenarioController } from './scenario.js'
@@ -74,6 +79,19 @@ export interface TemplateCreateResponse {
 const isTemplateCategory = (value: unknown): value is TemplateCategory =>
   typeof value === 'string' && (TEMPLATE_CATEGORIES as readonly string[]).includes(value)
 
+/**
+ * The `reason` Meta attaches to a template status webhook. `NONE` on a clean
+ * approval — the field is always present, so a receiver reading it never gets
+ * undefined.
+ */
+const TRANSITION_REASONS: Record<TemplateStatus, string> = {
+  APPROVED: 'NONE',
+  PENDING: 'NONE',
+  REJECTED: 'INVALID_FORMAT',
+  PAUSED: 'PAIRWISE_QUALITY_SIGNAL',
+  DISABLED: 'ABUSIVE_CONTENT',
+}
+
 /** Meta names conversation categories after template categories, lowercased. */
 const templateCategoryToConversation = (category: TemplateCategory): ConversationCategory =>
   category.toLowerCase() as ConversationCategory
@@ -91,7 +109,13 @@ export class WamockEngine {
   readonly windows: ServiceWindows
   readonly scenario = new ScenarioController()
   readonly conversations = new Conversations()
+  readonly tokens = new TokenStore()
+  readonly limits = new MessagingLimits()
   readonly #media = new Map<string, MediaRecord>()
+  readonly #signupCodes = new Map<
+    string,
+    { wabaId: string; phoneNumberId: string; used: boolean }
+  >()
 
   constructor(options: WamockEngineOptions) {
     this.clock = new VirtualClock({
@@ -127,7 +151,19 @@ export class WamockEngine {
 
   // --- POST /{version}/{phone_number_id}/messages -------------------------
 
-  sendMessage(phoneNumberId: string, body: Record<string, unknown>): SendMessageResponse {
+  sendMessage(
+    phoneNumberId: string,
+    body: Record<string, unknown>,
+    accessToken?: string,
+  ): SendMessageResponse {
+    // Unauthenticated sends are allowed on purpose: most users never touch
+    // tokens, and requiring one would add three steps to the quickstart for no
+    // benefit. But a token that IS supplied must actually be valid — that is
+    // how the "expires between connect and first send" scenario reproduces.
+    if (accessToken !== undefined && !this.tokens.isValid(accessToken, this.clock.now())) {
+      throw new GraphError(ERROR_CODES.TOKEN_EXPIRED)
+    }
+
     const phoneNumber = this.state.phoneNumber(phoneNumberId)
     if (!phoneNumber) {
       // Meta's wording for an object id it does not recognize.
@@ -186,9 +222,20 @@ export class WamockEngine {
 
     // A deliberately forced error wins over the random rate: a scenario you
     // asked for must not be overridden by chance.
+    // Tiers cap UNIQUE recipients per 24h, not messages: a business can send
+    // thousands to known contacts and still be blocked by one new one.
+    const tier = phoneNumber.messagingTier ?? 'TIER_UNLIMITED'
+    if (!this.limits.allows(phoneNumberId, waId, tier, this.clock.now())) {
+      throw new GraphError(ERROR_CODES.SPAM_RATE_LIMIT, {
+        details: `This phone number has reached its messaging limit of ${TIER_CAPS[tier]} unique recipients in 24 hours (${tier}).`,
+      })
+    }
+
     const forced = this.scenario.takeForcedError()
     if (forced !== undefined) throw new GraphError(forced)
     if (this.scenario.shouldFailSend()) throw new GraphError(ERROR_CODES.INTERNAL)
+
+    this.limits.record(phoneNumberId, waId, this.clock.now())
 
     const wamid = makeWamid(phoneNumberId, this.state.nextSeq())
     const { messaging_product: _mp, to: _to, type: _t, ...rest } = body
@@ -355,7 +402,199 @@ export class WamockEngine {
     }
 
     this.state.putTemplate({ ...template, status: to })
+
+    // Meta announces the outcome asynchronously — hours after submission, as a
+    // webhook, never as a response to your API call. Integrations that only
+    // react to their own calls never learn a template was approved or paused,
+    // and find out when sends start failing.
+    const anyNumber = this.state
+      .phoneNumbers()
+      .find((phoneNumber) => phoneNumber.wabaId === wabaId)
+    if (anyNumber) {
+      this.#enqueue(
+        anyNumber.phoneNumberId,
+        buildTemplateStatusPayload({
+          wabaId,
+          templateId: template.id,
+          name,
+          language,
+          event: to,
+          reason: TRANSITION_REASONS[to],
+        }),
+      )
+    }
+
     return { success: true, status: to }
+  }
+
+  // --- tech provider mode (spec §9) ---------------------------------------
+
+  /**
+   * Control API: mint an Embedded Signup code plus the `phone_number_id` and
+   * `waba_id` the real signup event carries alongside it, which the frontend
+   * forwards to your backend.
+   *
+   * `subscribed: false` creates the tenant WITHOUT subscribing your app — the
+   * state that makes inbound messages vanish silently (spec §9.3).
+   */
+  createSignup(options: { subscribed?: boolean } = {}): {
+    code: string
+    phone_number_id: string
+    waba_id: string
+  } {
+    const seq = this.state.nextSeq()
+    const wabaId = `WABA_TENANT_${seq}`
+    const phoneNumberId = `PNID_TENANT_${seq}`
+
+    this.state.registerWaba({
+      wabaId,
+      appId: this.state.defaultAppId,
+      subscribedApps: options.subscribed === false ? new Set() : new Set([this.state.defaultAppId]),
+    })
+    this.state.registerPhoneNumber({
+      phoneNumberId,
+      wabaId,
+      displayPhoneNumber: `1555000${String(seq).padStart(4, '0')}`,
+    })
+
+    const code = `AQD${randomBytes(16).toString('base64url')}`
+    this.#signupCodes.set(code, { wabaId, phoneNumberId, used: false })
+    return { code, phone_number_id: phoneNumberId, waba_id: wabaId }
+  }
+
+  /** `GET /{version}/oauth/access_token` — trade a signup code for a token. */
+  exchangeCode(clientId: string, clientSecret: string, code: string): { access_token: string; token_type: string } {
+    const app = this.state.app(clientId)
+    if (!app || app.appSecret !== clientSecret) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        message: 'Invalid OAuth access token',
+        details: 'The client_id or client_secret does not match a configured app.',
+      })
+    }
+
+    const signup = this.#signupCodes.get(code)
+    // Single-use. A retry that "works" would hide a double-connect, which in
+    // production means two accounts pointed at one number.
+    if (!signup || signup.used) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: 'This authorization code has been used or has expired.',
+      })
+    }
+    signup.used = true
+
+    const token = this.tokens.issue(
+      { appId: clientId, kind: 'permanent', wabaId: signup.wabaId },
+      this.clock.now(),
+    )
+    return { access_token: token, token_type: 'bearer' }
+  }
+
+  /** Control API: mint a token of a chosen kind, to exercise expiry and scopes. */
+  issueToken(options: { kind?: 'permanent' | 'short' | 'long'; scopes?: string[] } = {}): {
+    access_token: string
+  } {
+    return {
+      access_token: this.tokens.issue(
+        {
+          appId: this.state.defaultAppId,
+          kind: options.kind ?? 'permanent',
+          ...(options.scopes !== undefined ? { scopes: options.scopes } : {}),
+        },
+        this.clock.now(),
+      ),
+    }
+  }
+
+  /** `GET /{version}/debug_token`. */
+  debugToken(inputToken: string, appAccessToken: string): { data: DebugTokenData } {
+    // Meta's app access token is literally `{app_id}|{app_secret}`.
+    const [appId, appSecret] = appAccessToken.split('|')
+    const app = appId ? this.state.app(appId) : undefined
+    if (!app || app.appSecret !== appSecret) {
+      throw new GraphError(ERROR_CODES.TOKEN_INVALID, {
+        details: 'The access_token must be a valid app access token: {app-id}|{app-secret}',
+      })
+    }
+    return { data: this.tokens.debug(inputToken, this.clock.now()) }
+  }
+
+  /** `POST /{waba_id}/subscribed_apps`. Without this, webhooks never arrive. */
+  subscribeApp(wabaId: string, accessToken?: string): { success: true } {
+    this.#assertWaba(wabaId)
+    this.#assertScope(accessToken, 'whatsapp_business_management')
+
+    const waba = this.state.waba(wabaId)!
+    this.state.subscribeApp(wabaId, waba.appId)
+    return { success: true }
+  }
+
+  listSubscribedApps(wabaId: string): { data: unknown[] } {
+    this.#assertWaba(wabaId)
+    const waba = this.state.waba(wabaId)!
+    return {
+      data: [...waba.subscribedApps].map((appId) => ({
+        whatsapp_business_api_data: { id: appId, name: appId, link: `https://wamock.invalid/${appId}` },
+      })),
+    }
+  }
+
+  /** `GET /{version}/{phone_number_id}?fields=…`. Only requested fields come back. */
+  getPhoneNumberFields(phoneNumberId: string, fields: string[]): Record<string, unknown> {
+    const phoneNumber = this.state.phoneNumber(phoneNumberId)
+    if (!phoneNumber) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Object with ID '${phoneNumberId}' does not exist`,
+      })
+    }
+
+    const available: Record<string, unknown> = {
+      display_phone_number: toDisplayPhoneNumber(phoneNumber.displayPhoneNumber),
+      verified_name: 'wamock Test Business',
+      quality_rating: phoneNumber.qualityRating ?? 'GREEN',
+      messaging_limit_tier: phoneNumber.messagingTier ?? 'TIER_UNLIMITED',
+      code_verification_status: 'VERIFIED',
+      platform_type: 'CLOUD_API',
+    }
+
+    const requested = fields.length > 0 ? fields : Object.keys(available)
+    const result: Record<string, unknown> = { id: phoneNumberId }
+    for (const field of requested) {
+      if (field in available) result[field] = available[field]
+    }
+    return result
+  }
+
+  /** Control API: change a number's quality rating and announce it. */
+  setQuality(phoneNumberId: string, quality: QualityRating): { success: true } {
+    const phoneNumber = this.state.phoneNumber(phoneNumberId)
+    if (!phoneNumber) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Object with ID '${phoneNumberId}' does not exist`,
+      })
+    }
+
+    this.state.updatePhoneNumber(phoneNumberId, { qualityRating: quality })
+    this.#enqueue(
+      phoneNumberId,
+      buildQualityUpdatePayload({
+        wabaId: phoneNumber.wabaId,
+        displayPhoneNumber: toDisplayPhoneNumber(phoneNumber.displayPhoneNumber),
+        quality,
+        currentLimit: phoneNumber.messagingTier ?? 'TIER_UNLIMITED',
+      }),
+    )
+    return { success: true }
+  }
+
+  /** Control API: set a number's messaging tier. */
+  setTier(phoneNumberId: string, tier: MessagingTier): { success: true } {
+    if (!this.state.phoneNumber(phoneNumberId)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Object with ID '${phoneNumberId}' does not exist`,
+      })
+    }
+    this.state.updatePhoneNumber(phoneNumberId, { messagingTier: tier })
+    return { success: true }
   }
 
   // --- media (spec §5.5, a stub by design) --------------------------------
@@ -410,11 +649,14 @@ export class WamockEngine {
 
   reset(): void {
     this.#media.clear()
+    this.#signupCodes.clear()
     this.deliverer.clear()
     this.state.reset()
     this.windows.clear()
     this.scenario.reset()
     this.conversations.clear()
+    this.tokens.clear()
+    this.limits.clear()
   }
 
   // --- internals ----------------------------------------------------------
@@ -597,6 +839,15 @@ export class WamockEngine {
     payload: ReturnType<typeof buildStatusPayload>,
     atMs?: number,
   ): void {
+    const phoneNumber = this.state.phoneNumber(phoneNumberId)
+    if (!phoneNumber) return
+
+    // Not subscribed → Meta delivers NOTHING for this WABA. No error, no
+    // warning, just silence — which is exactly the diagnosis problem this
+    // reproduces (spec §9.3). Emitting an error here would make the mock
+    // easier and less useful.
+    if (!this.state.isSubscribed(phoneNumber.wabaId)) return
+
     const appSecret = this.state.appSecretForPhoneNumber(phoneNumberId)
     // Unknown number → no secret → nothing to sign with. Callers validate the
     // number first, so reaching here means a bug, not a user error.
@@ -605,5 +856,20 @@ export class WamockEngine {
       appSecret,
       ...(atMs !== undefined ? { atMs } : {}),
     })
+  }
+
+  #assertScope(accessToken: string | undefined, scope: string): void {
+    // No token supplied → no scope check. Same reasoning as sendMessage: the
+    // simple path must not require authentication it does not need.
+    if (accessToken === undefined) return
+    if (!this.tokens.isValid(accessToken, this.clock.now())) {
+      throw new GraphError(ERROR_CODES.TOKEN_EXPIRED)
+    }
+    if (!this.tokens.hasScope(accessToken, scope)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        message: 'Permissions error',
+        details: `The access token does not have the required permission: ${scope}`,
+      })
+    }
   }
 }

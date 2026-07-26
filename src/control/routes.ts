@@ -32,6 +32,36 @@ const AdvanceSchema = z.object({ ms: z.number().int() })
 
 const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) })
 
+const SignupSchema = z.object({ subscribed: z.boolean().optional() }).strict()
+
+const TokenSchema = z
+  .object({
+    kind: z.enum(['permanent', 'short', 'long']).optional(),
+    scopes: z.array(z.string()).optional(),
+  })
+  .strict()
+
+const QualitySchema = z
+  .object({
+    phone_number_id: z.string().optional(),
+    quality_rating: z.enum(['RED', 'YELLOW', 'GREEN']),
+  })
+  .strict()
+
+export const MESSAGING_TIERS = [
+  'TIER_1',
+  'TIER_2',
+  'TIER_250',
+  'TIER_1K',
+  'TIER_10K',
+  'TIER_100K',
+  'TIER_UNLIMITED',
+] as const
+
+const TierSchema = z
+  .object({ phone_number_id: z.string().optional(), tier: z.enum(MESSAGING_TIERS) })
+  .strict()
+
 const StatusSchema = z.object({
   id: z.string(),
   status: z.enum(['sent', 'delivered', 'read', 'failed']),
@@ -172,6 +202,71 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     // error handler turns them into a Meta-shaped 100.
     engine.scenario.configure(update)
     return reply.send({ success: true, scenario: engine.scenario.config })
+  })
+
+  // --- tech provider controls (spec §9) ------------------------------------
+
+  /**
+   * Mint an Embedded Signup code plus the fields the real signup event carries
+   * beside it. `subscribed: false` creates the tenant WITHOUT subscribing your
+   * app — the state where inbound messages vanish with no error at all.
+   */
+  app.post('/__mock/embedded-signup', async (request, reply) => {
+    const parsed = SignupSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Invalid signup options' })
+    }
+    return reply.send(
+      engine.createSignup(
+        parsed.data.subscribed !== undefined ? { subscribed: parsed.data.subscribed } : {},
+      ),
+    )
+  })
+
+  /** Mint a token of a chosen kind, to exercise expiry and missing scopes. */
+  app.post('/__mock/tokens', async (request, reply) => {
+    const parsed = TokenSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: 'kind must be one of {permanent, short, long}',
+      })
+    }
+    return reply.send(
+      engine.issueToken({
+        ...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
+        ...(parsed.data.scopes !== undefined ? { scopes: parsed.data.scopes } : {}),
+      }),
+    )
+  })
+
+  app.post('/__mock/quality', async (request, reply) => {
+    const parsed = QualitySchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: 'quality_rating must be one of {RED, YELLOW, GREEN}',
+      })
+    }
+    return reply.send(
+      engine.setQuality(
+        parsed.data.phone_number_id ?? engine.state.defaultPhoneNumberId,
+        parsed.data.quality_rating,
+      ),
+    )
+  })
+
+  app.post('/__mock/tier', async (request, reply) => {
+    const parsed = TierSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `tier must be one of {${MESSAGING_TIERS.join(', ')}}`,
+      })
+    }
+    return reply.send(
+      engine.setTier(
+        parsed.data.phone_number_id ?? engine.state.defaultPhoneNumberId,
+        parsed.data.tier,
+      ),
+    )
   })
 
   app.get('/__mock/messages', async (_request, reply) =>

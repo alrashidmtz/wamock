@@ -44,14 +44,26 @@ All notable changes to this project are documented here. Format follows
 - **Docker image** and examples for express, vitest, GitHub Actions and
   docker-compose.
 
+- **Tech Provider mode** — Embedded Signup codes (single-use) and token
+  exchange, `debug_token` with permanent / short / long / revoked tokens,
+  `subscribed_apps` including the unsubscribed state that silently drops every
+  webhook, phone-number field lookup, per-tenant webhook signing,
+  `message_template_status_update` and `phone_number_quality_update` webhooks,
+  quality ratings and messaging tiers metered by unique recipients per 24h.
+
 ### Known limitations
 
 - `conversation` and `pricing` are **modeled from Meta's public documentation
   rather than captured from production traffic** — neither audited integration
   consumed those fields. Shape and field names are faithful; treat the finer
   points of category assignment as best-effort.
-- No GUI, no disk persistence, no multi-tenant auth, no real media bytes.
+- No GUI, no disk persistence, no real media bytes.
 - No WhatsApp Flows and no calling.
+- Access tokens are **optional**. Calls without an `Authorization` header are
+  accepted so the quickstart stays short; a token that IS supplied gets
+  validated for expiry and scope. wamock is a local tool, not an auth server.
+- `TIER_1` and `TIER_2` are wamock additions, not Meta tiers — they exist so a
+  messaging-limit test does not need 250 recipients.
 
 ### Not yet verified
 

@@ -78,10 +78,13 @@ describe('the full lifecycle, with no network', () => {
     await post('/__mock/inbound', { from: CUSTOMER, text: 'hola', name: 'Ana' })
     await advance(0)
 
-    const inboundWebhook = valueOf(inbox[0]!)
-    expect(verifySignature(SECRET, inbox[0]!.body, inbox[0]!.signature)).toBe(true)
-    expect(inboundWebhook.messages[0].from).toBe(CUSTOMER)
-    expect(inboundWebhook.messages[0].from).not.toContain('+')
+    // Select by content, not by index: the approval in step 1 emits its own
+    // `message_template_status_update` webhook, and asserting on inbox[0]
+    // would silently depend on delivery order.
+    const inboundDelivery = inbox.find((raw) => valueOf(raw).messages)!
+    expect(verifySignature(SECRET, inboundDelivery.body, inboundDelivery.signature)).toBe(true)
+    expect(valueOf(inboundDelivery).messages[0].from).toBe(CUSTOMER)
+    expect(valueOf(inboundDelivery).messages[0].from).not.toContain('+')
 
     // 3. The app replies with free-form text. Allowed: the window is open.
     inbox.length = 0

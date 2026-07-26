@@ -17,6 +17,18 @@ import { ERROR_CODES, GraphError } from './errors/graph-error.js'
  */
 const VERSION_PATTERN = /^v\d+\.\d+$/
 
+/**
+ * Pull the bearer token out of the Authorization header, or undefined when
+ * there is none. Absent is meaningful: unauthenticated calls are allowed so the
+ * quickstart stays short, but a token that IS supplied gets validated.
+ */
+function bearerToken(headers: Record<string, unknown>): string | undefined {
+  const header = headers['authorization']
+  if (typeof header !== 'string' || !header.toLowerCase().startsWith('bearer ')) return undefined
+  const token = header.slice('bearer '.length).trim()
+  return token === '' ? undefined : token
+}
+
 export interface ServerOptions {
   /** Emit a line per request. Off by default so tests stay quiet. */
   logger?: boolean
@@ -55,7 +67,57 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
         return reply.callNotFound()
       }
       const body = (request.body ?? {}) as Record<string, unknown>
-      return reply.send(engine.sendMessage(request.params.phoneNumberId, body))
+      return reply.send(
+        engine.sendMessage(request.params.phoneNumberId, body, bearerToken(request.headers)),
+      )
+    },
+  )
+
+  // --- tech provider (spec §9) ---------------------------------------------
+  // Registered BEFORE the catch-all `/:version/:objectId` so they win the
+  // route match.
+
+  app.get<{ Params: { version: string }; Querystring: Record<string, string> }>(
+    '/:version/oauth/access_token',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const { client_id: clientId, client_secret: clientSecret, code } = request.query
+      if (!clientId || !clientSecret || !code) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: 'client_id, client_secret and code are all required',
+        })
+      }
+      return reply.send(engine.exchangeCode(clientId, clientSecret, code))
+    },
+  )
+
+  app.get<{ Params: { version: string }; Querystring: Record<string, string> }>(
+    '/:version/debug_token',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const { input_token: inputToken, access_token: accessToken } = request.query
+      if (!inputToken || !accessToken) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: 'input_token and access_token are both required',
+        })
+      }
+      return reply.send(engine.debugToken(inputToken, accessToken))
+    },
+  )
+
+  app.post<{ Params: { version: string; wabaId: string } }>(
+    '/:version/:wabaId/subscribed_apps',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(engine.subscribeApp(request.params.wabaId, bearerToken(request.headers)))
+    },
+  )
+
+  app.get<{ Params: { version: string; wabaId: string } }>(
+    '/:version/:wabaId/subscribed_apps',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(engine.listSubscribedApps(request.params.wabaId))
     },
   )
 
@@ -70,13 +132,26 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     },
   )
 
-  // `GET /{version}/{media_id}` — the same shape as any other Graph object
-  // fetch, which is why it is registered after the more specific routes.
-  app.get<{ Params: { version: string; objectId: string } }>(
+  /**
+   * `GET /{version}/{object_id}` — Graph's generic object fetch. It serves both
+   * media metadata and phone-number fields, so it dispatches on which object
+   * the id names. Registered last, after every more specific route.
+   */
+  app.get<{ Params: { version: string; objectId: string }; Querystring: { fields?: string } }>(
     '/:version/:objectId',
     async (request, reply) => {
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
-      return reply.send(engine.getMedia(request.params.objectId))
+      const { objectId } = request.params
+
+      if (engine.state.phoneNumber(objectId)) {
+        const fields = (request.query.fields ?? '')
+          .split(',')
+          .map((field) => field.trim())
+          .filter(Boolean)
+        return reply.send(engine.getPhoneNumberFields(objectId, fields))
+      }
+
+      return reply.send(engine.getMedia(objectId))
     },
   )
 

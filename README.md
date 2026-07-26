@@ -188,6 +188,50 @@ across v17 through v23.
 | `POST /__mock/scenario` | latency, failure rates, duplication, ordering |
 | `POST /__mock/reset` · `GET /__mock/state` · `GET /__mock/messages` | inspect and reset |
 
+### Tech Provider mode
+
+If you onboard *other* businesses onto your own Meta app, this is the surface
+that breaks and that no other mock covers.
+
+| Endpoint | Notes |
+|---|---|
+| `GET /{version}/oauth/access_token` | exchange an Embedded Signup code; single-use |
+| `GET /{version}/debug_token` | `is_valid` + `expires_at` (`0` = never expires) |
+| `POST /{version}/{waba_id}/subscribed_apps` | without it, webhooks never arrive |
+| `GET /{version}/{waba_id}/subscribed_apps` | list subscriptions |
+| `GET /{version}/{phone_number_id}?fields=` | `display_phone_number`, `quality_rating`, `messaging_limit_tier` |
+
+Control endpoints: `POST /__mock/embedded-signup`, `POST /__mock/tokens`,
+`POST /__mock/quality`, `POST /__mock/tier`.
+
+**The four scenarios worth reproducing:**
+
+1. **The Graph Explorer token.** Someone pastes a ~2h token into your connect
+   form. It works. Two hours later every send is a 401 and nothing says why.
+   ```bash
+   curl -X POST localhost:4004/__mock/tokens -d '{"kind":"short"}'
+   # ...send with that Bearer token, advance 3h, watch it become 190
+   ```
+2. **The unsubscribed WABA.** The number connects, the dashboard looks correct,
+   and inbound messages simply never arrive — no error anywhere.
+   ```bash
+   curl -X POST localhost:4004/__mock/embedded-signup -d '{"subscribed":false}'
+   ```
+3. **Cross-signing.** You host numbers for your own app *and* for customers who
+   bring their own. Verifying everything with one secret works right up until
+   the second app exists. wamock signs each tenant's webhooks with that
+   tenant's secret.
+4. **Asynchronous template approval.** Approval lands hours later as a
+   `message_template_status_update` webhook, never as a response to your
+   submission. Integrations that only react to their own calls never see it.
+
+`expires_at: 0` means **never expires**, not "expired in 1970". Code that
+compares it numerically against the clock rejects exactly the System User
+tokens that are safe to use.
+
+Messaging tiers cap **unique recipients per rolling 24 hours**, not messages —
+so metering message volume tells you nothing about how close you are.
+
 ### Error catalogue
 
 | Code | Case | Retry? |
@@ -231,7 +275,7 @@ immediately. "The webhook never arrived" is invisible until something times out
 ## Docker
 
 ```bash
-docker run -p 4004:4004 ghcr.io/OWNER/wamock \
+docker run -p 4004:4004 ghcr.io/alrashidmtz/wamock \
   --app-secret shhh --webhook-url http://host.docker.internal:3000/webhook
 ```
 

@@ -56,11 +56,32 @@ export class MockState {
     this.#apps.set(app.appId, { ...app })
   }
 
-  registerWaba(waba: Waba): void {
+  registerWaba(waba: Omit<Waba, 'subscribedApps'> & { subscribedApps?: Set<string> }): void {
     if (!this.#apps.has(waba.appId)) {
       throw new Error(`Cannot register WABA ${waba.wabaId}: unknown app ${waba.appId}`)
     }
-    this.#wabas.set(waba.wabaId, { ...waba })
+    this.#wabas.set(waba.wabaId, {
+      wabaId: waba.wabaId,
+      appId: waba.appId,
+      subscribedApps: new Set(waba.subscribedApps ?? []),
+    })
+  }
+
+  /** Subscribe an app to a WABA's webhooks (`POST /{waba_id}/subscribed_apps`). */
+  subscribeApp(wabaId: string, appId: string): void {
+    const waba = this.#wabas.get(wabaId)
+    if (!waba) throw new Error(`Cannot subscribe to unknown WABA ${wabaId}`)
+    waba.subscribedApps.add(appId)
+  }
+
+  /**
+   * Whether this WABA's owning app is subscribed. When false the mock delivers
+   * nothing for its numbers — reproducing Meta's silence rather than inventing
+   * an error that does not exist.
+   */
+  isSubscribed(wabaId: string): boolean {
+    const waba = this.#wabas.get(wabaId)
+    return waba !== undefined && waba.subscribedApps.has(waba.appId)
   }
 
   registerPhoneNumber(phoneNumber: PhoneNumber): void {
@@ -94,6 +115,13 @@ export class MockState {
   /** Every hosted WABA. Carries no secrets — safe to expose for inspection. */
   wabas(): Waba[] {
     return [...this.#wabas.values()]
+  }
+
+  /** Replace a phone number's mutable attributes (quality, tier). */
+  updatePhoneNumber(phoneNumberId: string, patch: Partial<PhoneNumber>): void {
+    const existing = this.#phoneNumbers.get(phoneNumberId)
+    if (!existing) return
+    this.#phoneNumbers.set(phoneNumberId, { ...existing, ...patch })
   }
 
   /**
@@ -175,7 +203,14 @@ export class MockState {
 
   #applySeed(): void {
     this.registerApp({ appId: this.defaultAppId, appSecret: this.#seed.appSecret })
-    this.registerWaba({ wabaId: this.defaultWabaId, appId: this.defaultAppId })
+    // The seeded WABA arrives already subscribed: the single-tenant case must
+    // not have to know that subscriptions exist. Unsubscribed WABAs are opt-in
+    // via the embedded-signup control endpoint.
+    this.registerWaba({
+      wabaId: this.defaultWabaId,
+      appId: this.defaultAppId,
+      subscribedApps: new Set([this.defaultAppId]),
+    })
     this.registerPhoneNumber({
       phoneNumberId: this.defaultPhoneNumberId,
       wabaId: this.defaultWabaId,

@@ -1,7 +1,7 @@
 # wamock alongside the app under test, the shape a CI pipeline wants.
 services:
   wamock:
-    image: ghcr.io/OWNER/wamock:latest
+    image: ghcr.io/alrashidmtz/wamock:latest
     command:
       - --port=4004
       - --app-secret=ci-test-secret
