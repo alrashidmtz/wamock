@@ -1,0 +1,58 @@
+{
+  "name": "wamock",
+  "version": "0.1.0",
+  "description": "A faithful, standalone mock of the WhatsApp Cloud API. Test your integration end-to-end without a WABA.",
+  "keywords": [
+    "whatsapp",
+    "whatsapp-cloud-api",
+    "meta",
+    "graph-api",
+    "mock",
+    "testing",
+    "waba",
+    "webhook"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "wamock": "./dist/cli.js"
+  },
+  "main": "./dist/lib.js",
+  "types": "./dist/lib.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/lib.d.ts",
+      "import": "./dist/lib.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "eslint src test",
+    "check": "npm run typecheck && npm run lint && npm run test:coverage"
+  },
+  "dependencies": {
+    "fastify": "^5.2.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@typescript-eslint/eslint-plugin": "^8.20.0",
+    "@typescript-eslint/parser": "^8.20.0",
+    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.18.0",
+    "typescript": "^5.7.3",
+    "vitest": "^2.1.8"
+  }
+}

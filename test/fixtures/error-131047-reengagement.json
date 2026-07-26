@@ -1,0 +1,12 @@
+{
+  "error": {
+    "message": "(#131047) Re-engagement message",
+    "type": "OAuthException",
+    "code": 131047,
+    "error_data": {
+      "messaging_product": "whatsapp",
+      "details": "Message failed to send because more than 24 hours have passed since the customer last replied to this number."
+    },
+    "fbtrace_id": "AtEsT0000000000000000001"
+  }
+}

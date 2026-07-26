@@ -1,0 +1,9 @@
+{
+  "error": {
+    "message": "Error validating access token: Session has expired.",
+    "type": "OAuthException",
+    "code": 190,
+    "error_subcode": 463,
+    "fbtrace_id": "AtEsT0000000000000000003"
+  }
+}

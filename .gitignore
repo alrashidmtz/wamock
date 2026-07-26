@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+.env
+.env.*
+
+# Internal spec — motivation and references to private projects.
+# Kept out of the public repo deliberately.
+specs/

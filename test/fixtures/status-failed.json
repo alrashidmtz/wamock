@@ -1,0 +1,38 @@
+{
+  "object": "whatsapp_business_account",
+  "entry": [
+    {
+      "id": "WABA_1",
+      "changes": [
+        {
+          "field": "messages",
+          "value": {
+            "messaging_product": "whatsapp",
+            "metadata": {
+              "display_phone_number": "+15550001111",
+              "phone_number_id": "PNID_1"
+            },
+            "statuses": [
+              {
+                "id": "wamid.TESTOUT2",
+                "status": "failed",
+                "timestamp": "1750000180",
+                "recipient_id": "5215555000001",
+                "errors": [
+                  {
+                    "code": 131026,
+                    "title": "Message undeliverable",
+                    "message": "Message undeliverable",
+                    "error_data": {
+                      "details": "Message could not be delivered to the recipient."
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}
