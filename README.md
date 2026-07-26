@@ -305,14 +305,15 @@ WhatsApp Flows or calling. See `CHANGELOG.md` for what's planned.
 
 ---
 
-## Hosted simulator
+## Is a hosted version worth building?
 
-A hosted version with a conversation UI, shareable scenarios and team
-workspaces is being considered. <!-- TODO(owner): replace with the real
-waitlist URL before announcing. Left as a placeholder deliberately rather
-than pointing at a guessed address. -->
+A hosted version — conversation UI, shareable scenarios, team workspaces — is
+an idea, not a plan. If you'd use one, say so in
+[Discussions](https://github.com/alrashidmtz/wamock/discussions); if enough
+people would, it gets built.
 
-**Waitlist:** _(link pending)_
+No email form. Starring the repo and opening issues tells us more than a
+signup would, and you get the tool either way.
 
 ## Contributing
 
