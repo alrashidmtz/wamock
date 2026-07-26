@@ -83,10 +83,29 @@ All notable changes to this project are documented here. Format follows
 - `TIER_1` and `TIER_2` are wamock additions, not Meta tiers — they exist so a
   messaging-limit test does not need 250 recipients.
 
-### Not yet verified
+### Dogfood findings
 
-- **Dogfood against a third-party integration test suite.** The acceptance
-  criterion of running an existing production integration's tests against
-  wamock unchanged (only swapping the Graph base URL) has not been exercised
-  yet. Until it has, treat "drop-in replacement" as a design goal rather than a
-  demonstrated fact.
+A pass against two production integrations turned up two things worth stating.
+
+**"Just change the Graph base URL" does not work.** Both integrations build
+their Graph URLs as string literals; neither had a base-URL setting. That is
+the normal case, so `installGraphInterceptor` (`wamock/intercept`) now swaps
+the destination underneath a client without modifying it. It patches the global
+`fetch` and therefore does not cover `axios`, `node-fetch` or raw
+`http.request`.
+
+**wamock used to reject every real client.** It validated any supplied bearer
+token, and real clients always send their own — so every call came back 401
+with code 190. All 389 tests missed it because each used a token the mock had
+issued, or none at all. Fixed: tokens wamock did not issue are accepted (it is
+not an auth server and cannot tell a real credential from a random string);
+tokens it did issue are still fully validated, which is what keeps the
+token-expiry scenario meaningful.
+
+### Still not verified
+
+- Running a **third-party integration's own test suite** end to end against
+  wamock. The dogfood here uses a client reconstructed to the contract those
+  integrations were observed to follow, exercised only through wamock's public
+  HTTP surface. That is weaker evidence than running someone else's suite, and
+  stronger than assertions written against the mock's internals.

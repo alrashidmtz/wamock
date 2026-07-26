@@ -84,6 +84,23 @@ export class TokenStore {
     return token
   }
 
+  /**
+   * Whether this token came from `issue()`.
+   *
+   * The distinction matters on the send path. wamock is not an auth server: it
+   * has no way to tell a real WABA token from a random string, so a token it
+   * never issued is of unknown provenance and must be let through. Rejecting
+   * those would 401 every real client, since real clients always send their
+   * own token — which is exactly the bug a dogfood run against a
+   * production-shaped client uncovered.
+   *
+   * Tokens wamock DID issue are fully validated, which is what keeps the
+   * "expires between connect and first send" scenario (spec §9.2) working.
+   */
+  isKnown(token: string): boolean {
+    return this.#tokens.has(token)
+  }
+
   /** Unknown tokens are invalid, never an exception — callers get a 401, not a 500. */
   isValid(token: string, nowMs: number): boolean {
     const record = this.#tokens.get(token)

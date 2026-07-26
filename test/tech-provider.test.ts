@@ -189,6 +189,53 @@ describe('§9.6.2 — the Graph Explorer token scenario', () => {
     expect(later.json().error.code).toBe(190)
   })
 
+  it('accepts a token wamock never issued — it is not an auth server', async () => {
+    // Regression. wamock used to validate ANY supplied token, so a real client
+    // sending its own credential got a 401 on every call. Every existing test
+    // missed it because they all used tokens the mock had minted, or none.
+    // A dogfood run against a production-shaped client caught it immediately.
+    await post('/__mock/inbound', { from: CUSTOMER, text: 'hola' })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v19.0/${engine.state.defaultPhoneNumberId}/messages`,
+      headers: {
+        'content-type': 'application/json',
+        authorization: 'Bearer EAAG-a-real-looking-token-from-someones-env-file',
+      },
+      payload: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: CUSTOMER,
+        type: 'text',
+        text: { body: 'hi' },
+      }),
+    })
+
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('still expires a token it DID issue, which is the scenario worth having', async () => {
+    // The permissiveness above must not cost the §9.2 scenario.
+    const token = (await post('/__mock/tokens', { kind: 'short' })).json().access_token
+    await post('/__mock/time/advance', { ms: 3 * HOUR })
+    await post('/__mock/inbound', { from: CUSTOMER, text: 'hola' })
+
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v19.0/${engine.state.defaultPhoneNumberId}/messages`,
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      payload: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: CUSTOMER,
+        type: 'text',
+        text: { body: 'hi' },
+      }),
+    })
+
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error.code).toBe(190)
+  })
+
   it('leaves unauthenticated sends alone, so the simple case stays simple', async () => {
     // Most users never touch tokens. Requiring one would make the quickstart
     // three steps longer for no benefit.

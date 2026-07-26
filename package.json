@@ -26,6 +26,10 @@
     ".": {
       "types": "./dist/lib.d.ts",
       "import": "./dist/lib.js"
+    },
+    "./intercept": {
+      "types": "./dist/intercept.d.ts",
+      "import": "./dist/intercept.js"
     }
   },
   "files": [

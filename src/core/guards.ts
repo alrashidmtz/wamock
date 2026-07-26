@@ -27,12 +27,20 @@ export function requirePhoneNumber(context: MockContext, phoneNumberId: string):
 }
 
 /**
- * Validate a bearer token, if one was supplied.
+ * Validate a bearer token — but only one wamock itself issued.
  *
- * Absent is deliberately fine: most users never touch tokens and requiring one
- * would add three steps to the quickstart for no benefit. But a token that IS
- * supplied must hold up — that is what makes the "expires between connect and
- * first send" scenario reproducible.
+ * Three cases, and the middle one is the important one:
+ *
+ * - **No token.** Fine. Most users never touch tokens and requiring one would
+ *   add three steps to the quickstart for no benefit.
+ * - **A token wamock did not issue.** Also fine. wamock is not an auth server
+ *   and cannot tell a real WABA token from a random string. Rejecting these
+ *   would 401 every real client, because real clients always send their own
+ *   token — a dogfood run against a production-shaped client found exactly
+ *   that, and it broke the drop-in promise completely.
+ * - **A token wamock issued.** Fully validated: expiry, revocation, scope.
+ *   This is what keeps the "expires between connect and first send" scenario
+ *   (spec §9.2) reproducible, which is the whole reason token emulation exists.
  */
 export function assertToken(
   context: MockContext,
@@ -40,6 +48,7 @@ export function assertToken(
   scope?: string,
 ): void {
   if (accessToken === undefined) return
+  if (!context.tokens.isKnown(accessToken)) return
 
   if (!context.tokens.isValid(accessToken, context.clock.now())) {
     throw new GraphError(ERROR_CODES.TOKEN_EXPIRED)

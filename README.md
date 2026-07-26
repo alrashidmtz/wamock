@@ -134,6 +134,28 @@ script produces the same message ids on every run.
 `mock.baseUrl` also serves real HTTP, so an app that only knows how to talk to a
 URL can be pointed at it in the same test.
 
+### If your client hardcodes `graph.facebook.com`
+
+Most do. Nobody adds configuration for a hostname that never changes — we
+checked two production integrations and **neither** had a base-URL setting.
+
+So swap the destination underneath instead, without touching the client:
+
+```ts
+import { installGraphInterceptor } from 'wamock/intercept'
+
+const mock = await createWamock({ appSecret: 'test-secret' })
+const restore = installGraphInterceptor({ baseUrl: mock.baseUrl })
+
+await myApp.sendWhatsAppMessage(...)   // still calls graph.facebook.com
+
+restore()
+```
+
+This patches the global `fetch`. It covers code that uses `fetch`; it does
+**not** cover `axios`, `node-fetch` or raw `http.request` — those need their own
+base URL or an HTTP proxy.
+
 ---
 
 ## Fidelity
