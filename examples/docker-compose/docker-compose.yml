@@ -1,0 +1,30 @@
+# wamock alongside the app under test, the shape a CI pipeline wants.
+services:
+  wamock:
+    image: ghcr.io/OWNER/wamock:latest
+    command:
+      - --port=4004
+      - --app-secret=ci-test-secret
+      - --webhook-url=http://app:3000/webhook
+      - --quiet
+    ports:
+      - '4004:4004'
+    healthcheck:
+      # Wait for readiness rather than sleeping: a fixed sleep is either too
+      # short on a loaded runner or wasted time on a fast one.
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:4004/__mock/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  app:
+    build: ../..
+    environment:
+      # Usually the only change needed to test against wamock instead of Meta.
+      GRAPH_API_BASE_URL: http://wamock:4004
+      WHATSAPP_PHONE_NUMBER_ID: PNID_DEFAULT
+      WHATSAPP_WABA_ID: WABA_DEFAULT
+      WA_APP_SECRET: ci-test-secret
+    depends_on:
+      wamock:
+        condition: service_healthy

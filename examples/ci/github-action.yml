@@ -1,0 +1,60 @@
+# Running your WhatsApp integration tests in CI against wamock.
+#
+# Two shapes are shown. Prefer the first: in library mode there is no server to
+# start, no port to wait for, and no chance of a flaky bind. Use the service
+# variant only when the code under test can talk to a URL and nothing else.
+
+name: integration tests
+
+on: [push, pull_request]
+
+jobs:
+  # --- Preferred: wamock runs inside the test process -----------------------
+  library-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      # No services, no health checks, no network. Virtual time means the 24h
+      # window test finishes in milliseconds.
+      - run: npm test
+
+  # --- Alternative: wamock as a background server --------------------------
+  server-mode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Start wamock
+        run: |
+          npx wamock start \
+            --port 4004 \
+            --app-secret "$WA_APP_SECRET" \
+            --webhook-url http://localhost:3000/webhook \
+            --quiet &
+          # Wait for the port rather than sleeping: a fixed sleep is either
+          # too short on a loaded runner or wasted time on a fast one.
+          npx wait-on -t 30000 tcp:4004
+        env:
+          WA_APP_SECRET: ${{ secrets.WA_APP_SECRET || 'ci-test-secret' }}
+
+      - name: Run tests
+        run: npm test
+        env:
+          # Point your Graph client at the mock. This is normally the only
+          # change needed to test against wamock instead of Meta.
+          GRAPH_API_BASE_URL: http://localhost:4004
+          WHATSAPP_PHONE_NUMBER_ID: PNID_DEFAULT
+          WHATSAPP_WABA_ID: WABA_DEFAULT
+          WA_APP_SECRET: ${{ secrets.WA_APP_SECRET || 'ci-test-secret' }}

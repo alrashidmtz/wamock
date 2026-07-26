@@ -1,0 +1,328 @@
+import { WamockEngine } from './core/engine.js'
+import type { ScenarioConfig } from './core/scenario.js'
+import type { TemplateCategory, TemplateStatus } from './core/templates.js'
+import type { OutboundMessage } from './core/types.js'
+import { createServer } from './server.js'
+import type { InboundContent } from './webhooks/payloads.js'
+import { inProcessTransport } from './webhooks/transport.js'
+import type { WebhookDelivery } from './webhooks/transport.js'
+import type { FastifyInstance } from 'fastify'
+
+/**
+ * Library mode (spec §8).
+ *
+ * The whole inbound → reply → status → expiry cycle, inside a test, with no
+ * network and no waiting. Two things make that work:
+ *
+ * - **Webhooks go straight to a callback.** No listener, no port, no flake.
+ * - **Time is virtual.** `advance(hours(25))` expires the service window
+ *   instantly and fires everything that came due.
+ *
+ * A real HTTP server still runs on an ephemeral port, so the same test can also
+ * point an app that only speaks URLs at `mock.baseUrl`.
+ */
+
+export interface CreateWamockOptions {
+  /** Signs outgoing webhooks. The app under test verifies against this. */
+  appSecret: string
+  /** Called with every webhook. This is what replaces a listening server. */
+  onWebhook?: (delivery: WebhookDelivery) => void | Promise<void>
+  /** Also POST webhooks to this URL, for an app that cannot take a callback. */
+  webhookUrl?: string
+  /** Starting virtual time. Defaults to now; pin it for byte-identical runs. */
+  start?: number
+  /** Shorten the 24h window to make expiry tests cheap. */
+  windowMs?: number
+  phoneNumberId?: string
+  wabaId?: string
+  displayPhoneNumber?: string
+}
+
+/** Shorthand for the inbound the control API accepts. */
+export interface InboundOptions {
+  from: string
+  name?: string
+  text?: string
+  buttonReply?: { id: string; title: string }
+  listReply?: { id: string; title: string; description?: string }
+  phoneNumberId?: string
+}
+
+export interface SendOptions {
+  to: string
+  text?: string
+  template?: { name: string; language: string; components?: unknown[] }
+  interactive?: Record<string, unknown>
+  phoneNumberId?: string
+}
+
+export interface ExpectSentCriteria {
+  type?: string
+  to?: string
+  text?: string
+  name?: string
+  language?: string
+}
+
+export interface Wamock {
+  /** Point an app's Graph base URL here. */
+  baseUrl: string
+  phoneNumberId: string
+  wabaId: string
+  /** The engine, for anything the helpers do not cover. */
+  engine: WamockEngine
+
+  inbound(options: InboundOptions): Promise<{ messageId: string }>
+  send(options: SendOptions): Promise<{ id: string }>
+
+  time: {
+    advance(ms: number): Promise<void>
+    now(): number
+  }
+
+  /** Create a template already APPROVED — the common test setup, in one call. */
+  approveTemplate(options: {
+    name: string
+    language: string
+    category?: TemplateCategory
+  }): Promise<void>
+  transitionTemplate(options: {
+    name: string
+    language: string
+    to: TemplateStatus
+  }): Promise<void>
+
+  messages(): OutboundMessage[]
+  expectSent(criteria: ExpectSentCriteria): OutboundMessage
+  scenario(config: Partial<ScenarioConfig>): void
+
+  reset(): Promise<void>
+  close(): Promise<void>
+}
+
+export async function createWamock(options: CreateWamockOptions): Promise<Wamock> {
+  const engine = new WamockEngine({
+    appSecret: options.appSecret,
+    // Frozen by default: a library-mode test that depends on wall time is a
+    // test that fails on a slow CI runner.
+    mode: 'frozen',
+    ...(options.start !== undefined ? { start: options.start } : {}),
+    ...(options.windowMs !== undefined ? { windowMs: options.windowMs } : {}),
+    ...(options.phoneNumberId !== undefined ? { phoneNumberId: options.phoneNumberId } : {}),
+    ...(options.wabaId !== undefined ? { wabaId: options.wabaId } : {}),
+    ...(options.displayPhoneNumber !== undefined
+      ? { displayPhoneNumber: options.displayPhoneNumber }
+      : {}),
+  })
+
+  engine.deliverer.setTransport(buildTransport(options))
+
+  const app = createServer(engine)
+  await app.listen({ port: 0, host: '127.0.0.1' })
+  const baseUrl = addressOf(app)
+
+  /**
+   * Advance by zero and settle. Every helper does this so callers never have
+   * to think about the gap between "the timer fired" and "the webhook was
+   * handed over" — the classic source of a passing-then-failing assertion.
+   */
+  const flush = async (): Promise<void> => {
+    engine.clock.advance(0)
+    await engine.settle()
+  }
+
+  return {
+    baseUrl,
+    phoneNumberId: engine.state.defaultPhoneNumberId,
+    wabaId: engine.state.defaultWabaId,
+    engine,
+
+    async inbound(inboundOptions) {
+      const result = engine.simulateInbound({
+        from: inboundOptions.from,
+        ...(inboundOptions.name !== undefined ? { contactName: inboundOptions.name } : {}),
+        ...(inboundOptions.phoneNumberId !== undefined
+          ? { phoneNumberId: inboundOptions.phoneNumberId }
+          : {}),
+        message: toInboundContent(inboundOptions),
+      })
+      await flush()
+      return result
+    },
+
+    async send(sendOptions) {
+      const response = engine.sendMessage(
+        sendOptions.phoneNumberId ?? engine.state.defaultPhoneNumberId,
+        toSendBody(sendOptions),
+      )
+      await flush()
+      return { id: response.messages[0]!.id }
+    },
+
+    time: {
+      async advance(ms) {
+        engine.clock.advance(ms)
+        await engine.settle()
+      },
+      now: () => engine.clock.now(),
+    },
+
+    async approveTemplate({ name, language, category = 'UTILITY' }) {
+      engine.createTemplate(engine.state.defaultWabaId, {
+        name,
+        language,
+        category,
+        components: [],
+      })
+      engine.transitionTemplate(engine.state.defaultWabaId, name, language, 'APPROVED')
+      await flush()
+    },
+
+    async transitionTemplate({ name, language, to }) {
+      engine.transitionTemplate(engine.state.defaultWabaId, name, language, to)
+      await flush()
+    },
+
+    messages: () => engine.state.outbound(),
+
+    expectSent(criteria) {
+      const sent = engine.state.outbound()
+      const match = sent.find((message) => matches(message, criteria))
+      if (!match) {
+        // Listing the actual traffic turns a bare assertion failure into a
+        // diagnosis. This is the single most useful thing a mock can print.
+        throw new Error(
+          `expectSent found no message matching ${JSON.stringify(criteria)}.\n` +
+            (sent.length === 0
+              ? 'Nothing was sent.'
+              : `Sent so far:\n${sent.map((m) => `  - ${describe(m)}`).join('\n')}`),
+        )
+      }
+      return match
+    },
+
+    scenario(config) {
+      engine.scenario.configure(config)
+    },
+
+    async reset() {
+      engine.reset()
+      await engine.settle()
+    },
+
+    async close() {
+      engine.clock.stop()
+      await app.close()
+    },
+  }
+}
+
+// --- internals ------------------------------------------------------------
+
+function buildTransport(options: CreateWamockOptions) {
+  const { onWebhook, webhookUrl } = options
+  return inProcessTransport(async (delivery) => {
+    await onWebhook?.(delivery)
+    if (!webhookUrl) return
+    // Same bytes, same signature — never re-serialize on the way out.
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Hub-Signature-256': delivery.signature,
+      },
+      body: delivery.body,
+    })
+    if (!response.ok) throw new Error(`webhook receiver returned HTTP ${response.status}`)
+  })
+}
+
+function addressOf(app: FastifyInstance): string {
+  const address = app.server.address()
+  if (address === null || typeof address === 'string') {
+    throw new Error('wamock could not determine its own listening address')
+  }
+  return `http://127.0.0.1:${address.port}`
+}
+
+function toInboundContent(options: InboundOptions): InboundContent {
+  if (options.buttonReply) {
+    return {
+      type: 'interactive',
+      interactive: { type: 'button_reply', button_reply: options.buttonReply },
+    }
+  }
+  if (options.listReply) {
+    return {
+      type: 'interactive',
+      interactive: { type: 'list_reply', list_reply: options.listReply },
+    }
+  }
+  return { type: 'text', text: { body: options.text ?? '' } }
+}
+
+function toSendBody(options: SendOptions): Record<string, unknown> {
+  if (options.template) {
+    return {
+      messaging_product: 'whatsapp',
+      to: options.to,
+      type: 'template',
+      template: {
+        name: options.template.name,
+        language: { code: options.template.language },
+        components: options.template.components ?? [],
+      },
+    }
+  }
+  if (options.interactive) {
+    return {
+      messaging_product: 'whatsapp',
+      to: options.to,
+      type: 'interactive',
+      interactive: options.interactive,
+    }
+  }
+  return {
+    messaging_product: 'whatsapp',
+    to: options.to,
+    type: 'text',
+    text: { body: options.text ?? '' },
+  }
+}
+
+function matches(message: OutboundMessage, criteria: ExpectSentCriteria): boolean {
+  if (criteria.type !== undefined && message.type !== criteria.type) return false
+  if (criteria.to !== undefined && message.to !== criteria.to.replace(/\D/g, '')) return false
+
+  if (criteria.text !== undefined) {
+    const body = (message.payload['text'] as { body?: string } | undefined)?.body
+    if (body !== criteria.text) return false
+  }
+
+  const template = message.payload['template'] as
+    | { name?: string; language?: { code?: string } }
+    | undefined
+  if (criteria.name !== undefined && template?.name !== criteria.name) return false
+  if (criteria.language !== undefined && template?.language?.code !== criteria.language) return false
+
+  return true
+}
+
+function describe(message: OutboundMessage): string {
+  const template = message.payload['template'] as
+    | { name?: string; language?: { code?: string } }
+    | undefined
+  const detail =
+    message.type === 'template'
+      ? `${template?.name} (${template?.language?.code})`
+      : JSON.stringify((message.payload['text'] as { body?: string } | undefined)?.body ?? message.payload)
+  return `${message.type} to ${message.to}: ${detail}`
+}
+
+export { WamockEngine } from './core/engine.js'
+export { createServer } from './server.js'
+export { GraphError, ERROR_CODES, isRetriable } from './errors/graph-error.js'
+export { signBody, verifySignature } from './webhooks/signature.js'
+export { verifyWebhookUrl } from './webhooks/handshake.js'
+export type { WebhookDelivery, WebhookTransport } from './webhooks/transport.js'
+export type { OutboundMessage } from './core/types.js'
