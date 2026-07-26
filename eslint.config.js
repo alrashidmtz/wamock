@@ -11,7 +11,12 @@ export default [
     plugins: { '@typescript-eslint': tseslint },
     rules: {
       ...tseslint.configs.recommended.rules,
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        // ignoreRestSiblings covers the `const { a, ...rest } = obj` idiom used
+        // to strip envelope fields before storing a payload.
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^_', ignoreRestSiblings: true },
+      ],
       '@typescript-eslint/consistent-type-imports': 'error',
     },
   },
