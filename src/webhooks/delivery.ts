@@ -34,12 +34,19 @@ export interface EnqueueOptions {
 export interface WebhookDelivererOptions {
   clock: Clock
   transport: WebhookTransport
+  /** Cap on retained delivery records. Oldest are evicted first. */
+  maxLogEntries?: number
 }
+
+/** Same reasoning as the outbound cap: bounded memory, never a silent drop. */
+const DEFAULT_MAX_LOG_ENTRIES = 10_000
 
 export class WebhookDeliverer {
   readonly #clock: Clock
   #transport: WebhookTransport
   #log: DeliveryRecord[] = []
+  #droppedLogEntries = 0
+  readonly #maxLogEntries: number
   /** Timer ids for deliveries not yet fired, so `clear()` can cancel them. */
   #pending = new Set<number>()
   /** In-flight transport promises, awaited by `settle()`. */
@@ -48,6 +55,7 @@ export class WebhookDeliverer {
   constructor(options: WebhookDelivererOptions) {
     this.#clock = options.clock
     this.#transport = options.transport
+    this.#maxLogEntries = options.maxLogEntries ?? DEFAULT_MAX_LOG_ENTRIES
   }
 
   /** Swap the transport at runtime — the server does this when a webhook URL is (re)configured. */
@@ -82,20 +90,34 @@ export class WebhookDeliverer {
     return [...this.#log]
   }
 
+  /** How many delivery records the cap evicted. Reported, never silent. */
+  droppedLogEntries(): number {
+    return this.#droppedLogEntries
+  }
+
   /** Drop the log and cancel anything still scheduled. Part of `reset()`. */
   clear(): void {
     for (const timerId of this.#pending) this.#clock.clear(timerId)
     this.#pending.clear()
     this.#log = []
+    this.#droppedLogEntries = 0
+  }
+
+  #record(entry: DeliveryRecord): void {
+    this.#log.push(entry)
+    if (this.#log.length > this.#maxLogEntries) {
+      this.#log.shift()
+      this.#droppedLogEntries++
+    }
   }
 
   #send(delivery: WebhookDelivery): void {
     const attempt = this.#transport(delivery)
       .then(() => {
-        this.#log.push({ ...delivery, ok: true })
+        this.#record({ ...delivery, ok: true })
       })
       .catch((err: unknown) => {
-        this.#log.push({
+        this.#record({
           ...delivery,
           ok: false,
           error: err instanceof Error ? err.message : String(err),

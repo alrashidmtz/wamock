@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { HELP_TEXT, parseArgs } from './cli-args.js'
+import { DEFAULT_HOST, HELP_TEXT, NON_LOOPBACK_HOSTS, parseArgs } from './cli-args.js'
 import { WamockEngine } from './core/engine.js'
 import { createServer } from './server.js'
 import { verifyWebhookUrl } from './webhooks/handshake.js'
@@ -51,7 +51,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const app = createServer(engine, { logger: !options.quiet })
-  await app.listen({ port: options.port, host: '0.0.0.0' })
+  await app.listen({ port: options.port, host: options.host })
 
   const base = `http://localhost:${options.port}`
   process.stdout.write(
@@ -59,6 +59,7 @@ async function main(argv: string[]): Promise<number> {
       '',
       `  wamock ${VERSION} — WhatsApp Cloud API mock`,
       '',
+      `  Listening on     ${options.host}:${options.port}`,
       `  Graph base URL   ${base}`,
       `  Control API      ${base}/__mock`,
       `  phone_number_id  ${engine.state.defaultPhoneNumberId}`,
@@ -73,6 +74,21 @@ async function main(argv: string[]): Promise<number> {
       '',
     ].join('\n'),
   )
+
+  if (NON_LOOPBACK_HOSTS.has(options.host)) {
+    // Loud on purpose. Someone will do this on a laptop in a shared space and
+    // hand every message the app under test sent to whoever is on that wifi.
+    process.stdout.write(
+      [
+        `  ! Bound to ${options.host} — reachable from your network.`,
+        '    The /__mock control API has NO authentication: anyone who can',
+        '    reach this port can read every message sent and inject forged',
+        '    inbound messages. Fine inside a container, not on a shared',
+        `    network. Use --host ${DEFAULT_HOST} to restrict it.`,
+        '',
+      ].join('\n'),
+    )
+  }
 
   if (options.webhookUrl) {
     // Run Meta's own subscription handshake. A receiver that answers "ok"

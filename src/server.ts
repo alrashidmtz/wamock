@@ -32,10 +32,17 @@ function bearerToken(headers: Record<string, unknown>): string | undefined {
 export interface ServerOptions {
   /** Emit a line per request. Off by default so tests stay quiet. */
   logger?: boolean
+  /** Max accepted request body, in bytes. Defaults to 1 MiB. */
+  bodyLimit?: number
 }
 
 export function createServer(engine: WamockEngine, options: ServerOptions = {}): FastifyInstance {
-  const app = Fastify({ logger: options.logger ?? false })
+  const app = Fastify({
+    logger: options.logger ?? false,
+    // Explicit rather than inherited: a mock accepts arbitrary bodies from
+    // whatever is under test, and 1 MiB is far above any real WhatsApp payload.
+    bodyLimit: options.bodyLimit ?? 1024 * 1024,
+  })
 
   // Every failure leaves as a Meta-shaped body. A fastify-shaped error would
   // teach the integration under test to parse something Meta never sends.

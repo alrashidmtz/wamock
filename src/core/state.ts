@@ -20,7 +20,15 @@ export interface SeedOptions {
   phoneNumberId?: string
   /** Digits only. */
   displayPhoneNumber?: string
+  /** Cap on recorded outbound messages. See `recordOutbound`. */
+  maxRecordedMessages?: number
 }
+
+/**
+ * Far above any realistic test, low enough that a forgotten server does not
+ * exhaust memory. Roughly a few MB of retained messages.
+ */
+const DEFAULT_MAX_RECORDED = 10_000
 
 const DEFAULTS = {
   appId: 'APP_DEFAULT',
@@ -40,6 +48,8 @@ export class MockState {
   #phoneNumbers = new Map<string, PhoneNumber>()
   #templates = new Map<string, Template>()
   #outbound: OutboundMessage[] = []
+  #droppedOutbound = 0
+  readonly #maxRecorded: number
   #seq = 0
 
   constructor(seed: SeedOptions) {
@@ -47,6 +57,7 @@ export class MockState {
     this.defaultAppId = seed.appId ?? DEFAULTS.appId
     this.defaultWabaId = seed.wabaId ?? DEFAULTS.wabaId
     this.defaultPhoneNumberId = seed.phoneNumberId ?? DEFAULTS.phoneNumberId
+    this.#maxRecorded = seed.maxRecordedMessages ?? DEFAULT_MAX_RECORDED
     this.#applySeed()
   }
 
@@ -172,11 +183,23 @@ export class MockState {
 
   recordOutbound(message: OutboundMessage): void {
     this.#outbound.push(message)
+    // Oldest-first eviction. A mock left running for a demo or a long CI job
+    // would otherwise grow until the process dies; the cap is far above any
+    // real test and the drop count is reported so truncation is never silent.
+    if (this.#outbound.length > this.#maxRecorded) {
+      this.#outbound.shift()
+      this.#droppedOutbound++
+    }
   }
 
   /** Copy, so inspection can never corrupt history. */
   outbound(): OutboundMessage[] {
     return [...this.#outbound]
+  }
+
+  /** How many recorded messages were evicted by the cap. Surfaced in `/__mock/state`. */
+  droppedOutbound(): number {
+    return this.#droppedOutbound
   }
 
   // --- determinism --------------------------------------------------------
@@ -197,6 +220,7 @@ export class MockState {
     this.#phoneNumbers = new Map()
     this.#templates = new Map()
     this.#outbound = []
+    this.#droppedOutbound = 0
     this.#seq = 0
     this.#applySeed()
   }

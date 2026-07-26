@@ -26,7 +26,10 @@ const InboundSchema = z
       .object({ id: z.string(), title: z.string(), description: z.string().optional() })
       .optional(),
   })
-  .passthrough()
+  // `.strict()`, like every other control schema: an ignored typo leaves the
+  // caller believing they configured something they did not. It also keeps
+  // unexpected keys from ever reaching the payload builder.
+  .strict()
 
 const AdvanceSchema = z.object({ ms: z.number().int() })
 
@@ -282,6 +285,9 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
       wabas: engine.state.wabas(),
       outboundCount: engine.state.outbound().length,
       webhooksDelivered: engine.deliverer.log().length,
+      // Reported so a truncated history never looks like a complete one.
+      droppedOutbound: engine.state.droppedOutbound(),
+      droppedWebhookLog: engine.deliverer.droppedLogEntries(),
     }),
   )
 

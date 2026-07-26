@@ -72,6 +72,12 @@ const metadata = (ctx: Context): WebhookMetadata => ({
 /** The type-specific content of an inbound message, minus the envelope fields. */
 export type InboundContent = { type: string } & Record<string, unknown>
 
+/** Envelope fields the mock owns; message content may never set them. */
+const RESERVED_MESSAGE_KEYS = new Set(['from', 'id', 'timestamp', 'type'])
+
+const stripReserved = (content: Record<string, unknown>): Record<string, unknown> =>
+  Object.fromEntries(Object.entries(content).filter(([key]) => !RESERVED_MESSAGE_KEYS.has(key)))
+
 export interface InboundOptions extends Context {
   /** Customer number in any format; normalized to `wa_id` form. */
   from: string
@@ -100,7 +106,12 @@ export function buildInboundPayload(options: InboundOptions): WebhookPayload {
         id: options.messageId,
         timestamp: toMetaTimestamp(options.timestampMs),
         type,
-        ...content,
+        // Reserved keys are stripped rather than relying on spread order.
+        // Meta emits the envelope fields first, so they stay first for
+        // fidelity — but that means `content` spreads LAST and could override
+        // `from` or `id`. Nothing feeds it unfiltered input today; this makes
+        // sure a future change that does cannot break the envelope silently.
+        ...stripReserved(content),
       },
     ],
   })

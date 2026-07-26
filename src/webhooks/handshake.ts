@@ -19,9 +19,13 @@ export interface HandshakeResult {
   reason?: string
 }
 
+/** Startup check — kept short so a dead receiver does not delay the banner. */
+export const DEFAULT_HANDSHAKE_TIMEOUT_MS = 5_000
+
 export async function verifyWebhookUrl(
   webhookUrl: string,
   verifyToken: string,
+  timeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
 ): Promise<HandshakeResult> {
   const challenge = randomBytes(8).toString('hex')
 
@@ -39,8 +43,14 @@ export async function verifyWebhookUrl(
 
   let response: Response
   try {
-    response = await fetch(url, { method: 'GET' })
+    // Bounded: the handshake runs at startup, and a receiver that accepts the
+    // connection without answering would otherwise hang the CLI before it ever
+    // prints its banner.
+    response = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(timeoutMs) })
   } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      return { ok: false, reason: `receiver did not respond within ${timeoutMs}ms` }
+    }
     return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
 

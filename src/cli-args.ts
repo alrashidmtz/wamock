@@ -7,6 +7,10 @@ import { randomBytes } from 'node:crypto'
 
 export interface CliOptions {
   port: number
+  /**
+   * Interface to bind. Loopback by default — see the note on DEFAULT_HOST.
+   */
+  host: string
   appSecret: string
   webhookUrl: string | undefined
   verifyToken: string
@@ -23,9 +27,27 @@ export interface ParsedArgs {
 
 const DEFAULT_PORT = 4004
 
+/**
+ * Loopback only, deliberately.
+ *
+ * The control API has no authentication — correct for a local tool, and the
+ * reason binding beyond loopback is dangerous. On a shared network anyone who
+ * can reach the port can read `/__mock/messages` (every message the app under
+ * test sent, recipients and bodies included) and POST `/__mock/inbound` to
+ * inject forged customer messages into it.
+ *
+ * Docker needs `--host 0.0.0.0` to publish the port; that is an explicit,
+ * warned-about opt-in rather than the default everyone gets.
+ */
+export const DEFAULT_HOST = '127.0.0.1'
+
+/** Binding to any of these exposes the unauthenticated control API. */
+export const NON_LOOPBACK_HOSTS = new Set(['0.0.0.0', '::', '::0'])
+
 /** Flags that consume the next argument. Anything else is a boolean or an error. */
 const VALUE_FLAGS = new Map<string, keyof CliOptions>([
   ['--port', 'port'],
+  ['--host', 'host'],
   ['--app-secret', 'appSecret'],
   ['--webhook-url', 'webhookUrl'],
   ['--verify-token', 'verifyToken'],
@@ -37,6 +59,7 @@ const VALUE_FLAGS = new Map<string, keyof CliOptions>([
 export function parseArgs(argv: string[]): ParsedArgs {
   const options: CliOptions = {
     port: DEFAULT_PORT,
+    host: DEFAULT_HOST,
     // Generated, never a fixed default: a hardcoded secret would make every
     // wamock signature forgeable by anyone who read the source, and someone
     // would eventually run this somewhere reachable.
@@ -107,6 +130,12 @@ Usage:
 
 Options:
   --port <n>                  Port to listen on (default: ${DEFAULT_PORT})
+  --host <addr>               Interface to bind (default: ${DEFAULT_HOST}).
+                              The control API is UNAUTHENTICATED: binding
+                              beyond loopback lets anyone who can reach the
+                              port read every message the app under test sent
+                              and inject forged inbound messages into it.
+                              Use 0.0.0.0 only inside a container.
   --app-secret <secret>       Signs outgoing webhooks (default: randomly generated)
   --webhook-url <url>         Where to deliver webhooks
   --verify-token <token>      Token used for the subscription handshake

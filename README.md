@@ -279,7 +279,22 @@ docker run -p 4004:4004 ghcr.io/alrashidmtz/wamock \
   --app-secret shhh --webhook-url http://host.docker.internal:3000/webhook
 ```
 
-See `examples/docker-compose` for a CI-shaped setup.
+The image already passes `--host 0.0.0.0`, which it needs to be reachable
+through `-p`. See `examples/docker-compose` for a CI-shaped setup.
+
+---
+
+## A note on exposure
+
+wamock binds **127.0.0.1 by default**. The `/__mock` control API has no
+authentication — appropriate for a local tool, and the reason the default
+matters: anyone who can reach the port can read `/__mock/messages` (every
+message your app sent, recipients and bodies included) and POST
+`/__mock/inbound` to inject forged customer messages into it.
+
+`--host 0.0.0.0` exists for containers, where the boundary does the limiting.
+The CLI prints a warning when you use it. Don't run it that way on a shared
+network, and never point it at production data.
 
 ---
 

@@ -19,22 +19,43 @@ export interface WebhookDelivery {
 export type WebhookTransport = (delivery: WebhookDelivery) => Promise<void>
 
 /**
+ * How long to wait for a receiver before giving up.
+ *
+ * A timeout is not politeness, it is a correctness requirement: without one, a
+ * receiver that accepts the connection and never answers blocks the delivery
+ * forever, `settle()` never resolves, and the test hangs with no output. A
+ * failed delivery is diagnosable; a hang is not.
+ */
+export const DEFAULT_DELIVERY_TIMEOUT_MS = 10_000
+
+/**
  * Deliver over HTTP to a configured URL — server mode, and library mode when
  * the app under test is a real server.
  */
-export function httpTransport(url: string): WebhookTransport {
+export function httpTransport(url: string, timeoutMs = DEFAULT_DELIVERY_TIMEOUT_MS): WebhookTransport {
   return async (delivery) => {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Hub-Signature-256': delivery.signature,
-        'User-Agent': 'facebookplatform/1.0',
-      },
-      // The already-serialized body — re-stringifying here would break the
-      // signature the receiver is about to verify.
-      body: delivery.body,
-    })
+    let response: Response
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Hub-Signature-256': delivery.signature,
+          'User-Agent': 'facebookplatform/1.0',
+        },
+        // The already-serialized body — re-stringifying here would break the
+        // signature the receiver is about to verify.
+        body: delivery.body,
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+    } catch (err) {
+      // Name the timeout explicitly. "TimeoutError" alone sends people hunting
+      // through their own code for a bug that is on the receiving end.
+      if (err instanceof Error && err.name === 'TimeoutError') {
+        throw new Error(`webhook receiver did not respond within ${timeoutMs}ms`)
+      }
+      throw err
+    }
     if (!response.ok) {
       throw new Error(`webhook receiver returned HTTP ${response.status}`)
     }

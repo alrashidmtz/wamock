@@ -4,6 +4,9 @@ services:
     image: ghcr.io/alrashidmtz/wamock:latest
     command:
       - --port=4004
+      # Required inside a container; loopback would be unreachable from the
+      # host. Safe here because the container boundary limits who can connect.
+      - --host=0.0.0.0
       - --app-secret=ci-test-secret
       - --webhook-url=http://app:3000/webhook
       - --quiet
