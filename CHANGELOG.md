@@ -51,6 +51,24 @@ All notable changes to this project are documented here. Format follows
   `message_template_status_update` and `phone_number_quality_update` webhooks,
   quality ratings and messaging tiers metered by unique recipients per 24h.
 
+### Security
+
+- **Binds `127.0.0.1` by default.** The `/__mock` control API is
+  unauthenticated by design; binding beyond loopback would let anyone who can
+  reach the port read every message the app under test sent and inject forged
+  inbound messages. `--host` is an explicit opt-in that prints a warning; the
+  Docker image passes it because the container boundary does the limiting.
+- **Outbound HTTP is bounded.** Webhook delivery and the startup handshake time
+  out, so a receiver that accepts a connection and never answers cannot leave
+  `settle()` unresolved and hang a test with no output.
+- **Message content cannot forge the webhook envelope.** Reserved keys
+  (`from`, `id`, `timestamp`, `type`) are stripped from message content, and
+  the inbound control schema is strict.
+- **Retained history is capped** with oldest-first eviction, and the dropped
+  count is reported in `/__mock/state` — a truncated history that looks
+  complete is worse than a smaller one that admits it.
+- `SECURITY.md` states the threat model plainly.
+
 ### Known limitations
 
 - `conversation` and `pricing` are **modeled from Meta's public documentation
