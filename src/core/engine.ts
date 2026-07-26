@@ -1,12 +1,18 @@
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
+import { validateInteractive } from '../graph/interactive.js'
 import { WebhookDeliverer } from '../webhooks/delivery.js'
 import { buildInboundPayload, buildStatusPayload } from '../webhooks/payloads.js'
 import type { InboundContent } from '../webhooks/payloads.js'
 import { nullTransport } from '../webhooks/transport.js'
 import type { WebhookTransport } from '../webhooks/transport.js'
 import { VirtualClock } from './clock.js'
-import { makeFbtraceId, makeWamid } from './ids.js'
+import { createHash } from 'node:crypto'
+
+import { makeFbtraceId, makeMediaId, makeWamid } from './ids.js'
 import { normalizeWaId } from './phone.js'
+import { Conversations } from './conversations.js'
+import type { ConversationCategory } from './conversations.js'
+import { ScenarioController } from './scenario.js'
 import { MockState } from './state.js'
 import { ServiceWindows } from './window.js'
 import {
@@ -29,13 +35,22 @@ const STATUS_DELAYS = {
 } as const
 
 /** Message types accepted in v1. `reaction`/`image` are stubbed in later phases. */
-const SUPPORTED_TYPES = new Set(['text', 'template'])
+const SUPPORTED_TYPES = new Set(['text', 'template', 'interactive'])
 
 /**
  * Types that require an open 24h service window. Templates are exempt — being
  * the only way out of a closed window is what templates are for.
  */
 const REQUIRES_OPEN_WINDOW = new Set(['text', 'interactive'])
+
+/** Meta's media download URLs are valid for roughly five minutes. */
+const MEDIA_URL_TTL_MS = 5 * 60 * 1000
+
+interface MediaRecord {
+  id: string
+  mimeType: string
+  uploadedAt: number
+}
 
 export interface WamockEngineOptions {
   appSecret: string
@@ -59,6 +74,10 @@ export interface TemplateCreateResponse {
 const isTemplateCategory = (value: unknown): value is TemplateCategory =>
   typeof value === 'string' && (TEMPLATE_CATEGORIES as readonly string[]).includes(value)
 
+/** Meta names conversation categories after template categories, lowercased. */
+const templateCategoryToConversation = (category: TemplateCategory): ConversationCategory =>
+  category.toLowerCase() as ConversationCategory
+
 export interface SendMessageResponse {
   messaging_product: 'whatsapp'
   contacts: Array<{ input: string; wa_id: string }>
@@ -70,6 +89,9 @@ export class WamockEngine {
   readonly state: MockState
   readonly deliverer: WebhookDeliverer
   readonly windows: ServiceWindows
+  readonly scenario = new ScenarioController()
+  readonly conversations = new Conversations()
+  readonly #media = new Map<string, MediaRecord>()
 
   constructor(options: WamockEngineOptions) {
     this.clock = new VirtualClock({
@@ -147,9 +169,26 @@ export class WamockEngine {
       throw new GraphError(ERROR_CODES.REENGAGEMENT)
     }
 
+    // Category has to be resolved before the send can fail, because it comes
+    // from the template being sent.
+    let category: ConversationCategory = 'service'
     if (type === 'template') {
-      this.#assertTemplateSendable(phoneNumber.wabaId, body['template'] as Record<string, unknown>)
+      const spec = body['template'] as Record<string, unknown>
+      this.#assertTemplateSendable(phoneNumber.wabaId, spec)
+      category = templateCategoryToConversation(
+        this.state.template(
+          phoneNumber.wabaId,
+          spec['name'] as string,
+          (spec['language'] as { code: string }).code,
+        )!.category,
+      )
     }
+
+    // A deliberately forced error wins over the random rate: a scenario you
+    // asked for must not be overridden by chance.
+    const forced = this.scenario.takeForcedError()
+    if (forced !== undefined) throw new GraphError(forced)
+    if (this.scenario.shouldFailSend()) throw new GraphError(ERROR_CODES.INTERNAL)
 
     const wamid = makeWamid(phoneNumberId, this.state.nextSeq())
     const { messaging_product: _mp, to: _to, type: _t, ...rest } = body
@@ -163,7 +202,11 @@ export class WamockEngine {
       sentAt: this.clock.now(),
     })
 
-    this.#scheduleStatuses(phoneNumberId, wamid, waId)
+    // The other failure axis: the send is accepted and the app is told so, but
+    // the webhooks never arrive. Silent, and the expensive one in production.
+    if (!this.scenario.shouldDropWebhook()) {
+      this.#scheduleStatuses(phoneNumberId, wamid, waId, category)
+    }
 
     return {
       messaging_product: 'whatsapp',
@@ -315,10 +358,63 @@ export class WamockEngine {
     return { success: true, status: to }
   }
 
+  // --- media (spec §5.5, a stub by design) --------------------------------
+
+  /**
+   * `POST /{phone_number_id}/media`. No bytes are stored — the point is a
+   * valid-looking id whose URL expires the way Meta's does.
+   */
+  uploadMedia(phoneNumberId: string, body: Record<string, unknown>): { id: string } {
+    if (!this.state.phoneNumber(phoneNumberId)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Object with ID '${phoneNumberId}' does not exist`,
+      })
+    }
+    const mimeType = body['type'] ?? body['mime_type']
+    if (typeof mimeType !== 'string' || mimeType === '') {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param type is required' })
+    }
+
+    const id = makeMediaId(this.state.nextSeq())
+    this.#media.set(id, { id, mimeType, uploadedAt: this.clock.now() })
+    return { id }
+  }
+
+  /**
+   * `GET /{media_id}`. Meta's download URLs live about five minutes; an
+   * integration that caches one and fetches it later gets a failure it never
+   * saw in testing, so the expiry is reproduced rather than ignored.
+   */
+  getMedia(mediaId: string): Record<string, unknown> {
+    const media = this.#media.get(mediaId)
+    if (!media) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Object with ID '${mediaId}' does not exist`,
+      })
+    }
+    if (this.clock.now() - media.uploadedAt >= MEDIA_URL_TTL_MS) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Media ID '${mediaId}' has expired. Media download URLs are valid for a limited time.`,
+      })
+    }
+
+    return {
+      messaging_product: 'whatsapp',
+      id: media.id,
+      mime_type: media.mimeType,
+      url: `https://wamock.invalid/media/${media.id}`,
+      sha256: createHash('sha256').update(media.id).digest('hex'),
+      file_size: 1024,
+    }
+  }
+
   reset(): void {
+    this.#media.clear()
     this.deliverer.clear()
     this.state.reset()
     this.windows.clear()
+    this.scenario.reset()
+    this.conversations.clear()
   }
 
   // --- internals ----------------------------------------------------------
@@ -340,6 +436,10 @@ export class WamockEngine {
           details: 'Param text[body] is required for type text',
         })
       }
+    }
+
+    if (type === 'interactive') {
+      validateInteractive(body['interactive'])
     }
 
     if (type === 'template') {
@@ -387,24 +487,109 @@ export class WamockEngine {
     }
   }
 
-  #scheduleStatuses(phoneNumberId: string, wamid: string, recipientId: string): void {
-    for (const [status, delay] of Object.entries(STATUS_DELAYS)) {
-      const at = this.clock.now() + delay
-      const phoneNumber = this.state.phoneNumber(phoneNumberId)!
-      this.#enqueue(
-        phoneNumberId,
-        buildStatusPayload({
-          wabaId: phoneNumber.wabaId,
-          phoneNumberId,
-          displayPhoneNumber: phoneNumber.displayPhoneNumber,
-          messageId: wamid,
-          status: status as 'sent' | 'delivered',
-          recipientId,
-          timestampMs: at,
-        }),
-        at,
-      )
+  #scheduleStatuses(
+    phoneNumberId: string,
+    wamid: string,
+    recipientId: string,
+    category: ConversationCategory,
+  ): void {
+    const conversation = this.conversations.open(
+      phoneNumberId,
+      recipientId,
+      { category },
+      this.clock.now(),
+    )
+
+    // Out-of-order means swapping the DELIVERY times, not relabelling the
+    // statuses: `delivered` genuinely arrives first, which is what a receiver
+    // sees in production and what breaks monotonic state machines.
+    const order = this.scenario.config.outOfOrderStatuses
+      ? ([
+          ['sent', STATUS_DELAYS.delivered],
+          ['delivered', STATUS_DELAYS.sent],
+        ] as const)
+      : ([
+          ['sent', STATUS_DELAYS.sent],
+          ['delivered', STATUS_DELAYS.delivered],
+        ] as const)
+
+    for (const [status, delay] of order) {
+      const at = this.clock.now() + delay + this.scenario.latency()
+      this.#enqueueStatus(phoneNumberId, {
+        messageId: wamid,
+        status,
+        recipientId,
+        timestampMs: at,
+        conversation: this.conversations.toWebhookConversation(conversation),
+        pricing: this.conversations.toWebhookPricing(conversation),
+        atMs: at,
+      })
     }
+  }
+
+  /**
+   * Deliver a status webhook now (or at `atMs`), honouring the duplication
+   * scenario. Meta is at-least-once; a receiver that assumes exactly-once
+   * double-books, double-charges or double-replies.
+   */
+  #enqueueStatus(
+    phoneNumberId: string,
+    options: {
+      messageId: string
+      status: 'sent' | 'delivered' | 'read' | 'failed'
+      recipientId: string
+      timestampMs: number
+      errorCode?: number
+      conversation?: Record<string, unknown>
+      pricing?: Record<string, unknown>
+      atMs?: number
+    },
+  ): void {
+    const phoneNumber = this.state.phoneNumber(phoneNumberId)!
+    const payload = buildStatusPayload({
+      wabaId: phoneNumber.wabaId,
+      phoneNumberId,
+      displayPhoneNumber: phoneNumber.displayPhoneNumber,
+      messageId: options.messageId,
+      status: options.status,
+      recipientId: options.recipientId,
+      timestampMs: options.timestampMs,
+      ...(options.errorCode !== undefined ? { errorCode: options.errorCode } : {}),
+      ...(options.conversation ? { conversation: options.conversation } : {}),
+      ...(options.pricing ? { pricing: options.pricing } : {}),
+    })
+
+    const copies = this.scenario.config.duplicateWebhooks ? 2 : 1
+    for (let i = 0; i < copies; i++) {
+      this.#enqueue(phoneNumberId, payload, options.atMs)
+    }
+  }
+
+  /**
+   * Control API: drive a message to a specific status on demand (spec §6.2) —
+   * the only way to test a `read` receipt or a delivery failure, since neither
+   * happens on its own.
+   */
+  forceStatus(
+    messageId: string,
+    status: 'sent' | 'delivered' | 'read' | 'failed',
+    errorCode?: number,
+  ): { success: true } {
+    const message = this.state.outbound().find((m) => m.id === messageId)
+    if (!message) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `No message with id '${messageId}' was sent through this mock`,
+      })
+    }
+
+    this.#enqueueStatus(message.phoneNumberId, {
+      messageId,
+      status,
+      recipientId: message.to,
+      timestampMs: this.clock.now(),
+      ...(errorCode !== undefined ? { errorCode } : {}),
+    })
+    return { success: true }
   }
 
   #enqueue(

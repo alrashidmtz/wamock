@@ -32,6 +32,33 @@ const AdvanceSchema = z.object({ ms: z.number().int() })
 
 const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) })
 
+const StatusSchema = z.object({
+  id: z.string(),
+  status: z.enum(['sent', 'delivered', 'read', 'failed']),
+  error: z.number().int().optional(),
+})
+
+/**
+ * `.strict()` on purpose: silently ignoring a mistyped knob is worse than
+ * rejecting it, because the scenario then looks configured and does nothing.
+ */
+const ScenarioSchema = z
+  .object({
+    seed: z.number().int().optional(),
+    latencyMs: z
+      .union([z.number().nonnegative(), z.object({ min: z.number(), max: z.number() }).strict()])
+      .optional(),
+    sendFailureRate: z.number().optional(),
+    webhookFailureRate: z.number().optional(),
+    duplicateWebhooks: z.boolean().optional(),
+    outOfOrderStatuses: z.boolean().optional(),
+    nextError: z
+      .object({ code: z.number().int(), times: z.number().int().positive().optional() })
+      .strict()
+      .optional(),
+  })
+  .strict()
+
 /**
  * Turn the control API's friendly shorthand (`{from, text}`) into the message
  * body Meta would deliver. Keeping the shorthand is deliberate: the quickstart
@@ -115,6 +142,37 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
       )
     },
   )
+
+  /** Drive a message to a status Meta would not produce on its own (spec §6.2). */
+  app.post('/__mock/statuses', async (request, reply) => {
+    const parsed = StatusSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      })
+    }
+    return reply.send(engine.forceStatus(parsed.data.id, parsed.data.status, parsed.data.error))
+  })
+
+  /** Global behaviour knobs: latency, failure rates, duplication, ordering (spec §6.5). */
+  app.post('/__mock/scenario', async (request, reply) => {
+    const parsed = ScenarioSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+      })
+    }
+    // Drop keys the caller omitted: under exactOptionalPropertyTypes an
+    // explicit `undefined` is not the same as an absent key, and passing one
+    // through would clobber the current value with nothing.
+    const update = Object.fromEntries(
+      Object.entries(parsed.data).filter(([, value]) => value !== undefined),
+    )
+    // Range violations surface from the controller as RangeError; the server's
+    // error handler turns them into a Meta-shaped 100.
+    engine.scenario.configure(update)
+    return reply.send({ success: true, scenario: engine.scenario.config })
+  })
 
   app.get('/__mock/messages', async (_request, reply) =>
     reply.send({ messages: engine.state.outbound() }),

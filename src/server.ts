@@ -59,6 +59,27 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     },
   )
 
+  // --- media (spec §5.5) ---------------------------------------------------
+
+  app.post<{ Params: { version: string; phoneNumberId: string } }>(
+    '/:version/:phoneNumberId/media',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const body = (request.body ?? {}) as Record<string, unknown>
+      return reply.send(engine.uploadMedia(request.params.phoneNumberId, body))
+    },
+  )
+
+  // `GET /{version}/{media_id}` — the same shape as any other Graph object
+  // fetch, which is why it is registered after the more specific routes.
+  app.get<{ Params: { version: string; objectId: string } }>(
+    '/:version/:objectId',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(engine.getMedia(request.params.objectId))
+    },
+  )
+
   // --- message templates (spec §5.3) --------------------------------------
 
   app.post<{ Params: { version: string; wabaId: string } }>(
