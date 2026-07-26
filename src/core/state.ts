@@ -1,3 +1,5 @@
+import type { Template } from './templates.js'
+import { templateKey } from './templates.js'
 import type { App, OutboundMessage, PhoneNumber, Waba } from './types.js'
 
 /**
@@ -36,6 +38,7 @@ export class MockState {
   #apps = new Map<string, App>()
   #wabas = new Map<string, Waba>()
   #phoneNumbers = new Map<string, PhoneNumber>()
+  #templates = new Map<string, Template>()
   #outbound: OutboundMessage[] = []
   #seq = 0
 
@@ -104,6 +107,39 @@ export class MockState {
     return this.#apps.get(waba?.appId ?? '')?.appSecret
   }
 
+  // --- templates ----------------------------------------------------------
+
+  putTemplate(template: Template): void {
+    this.#templates.set(templateKey(template.wabaId, template.name, template.language), {
+      ...template,
+    })
+  }
+
+  /**
+   * Exact match on all three parts. There is deliberately no "find by name"
+   * fallback: falling back to another language is precisely the leniency that
+   * hides the per-language approval trap.
+   */
+  template(wabaId: string, name: string, language: string): Template | undefined {
+    return this.#templates.get(templateKey(wabaId, name, language))
+  }
+
+  templatesForWaba(wabaId: string): Template[] {
+    return [...this.#templates.values()].filter((t) => t.wabaId === wabaId)
+  }
+
+  /** Meta deletes by name, taking every language with it. Returns how many went. */
+  deleteTemplatesByName(wabaId: string, name: string): number {
+    let removed = 0
+    for (const [key, template] of this.#templates) {
+      if (template.wabaId === wabaId && template.name === name) {
+        this.#templates.delete(key)
+        removed++
+      }
+    }
+    return removed
+  }
+
   // --- traffic ------------------------------------------------------------
 
   recordOutbound(message: OutboundMessage): void {
@@ -131,6 +167,7 @@ export class MockState {
     this.#apps = new Map()
     this.#wabas = new Map()
     this.#phoneNumbers = new Map()
+    this.#templates = new Map()
     this.#outbound = []
     this.#seq = 0
     this.#applySeed()

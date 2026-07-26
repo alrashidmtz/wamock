@@ -27,6 +27,20 @@ beforeEach(async () => {
   await app.ready()
 })
 
+/**
+ * Open the 24h window the way a real scenario does — the customer writes in —
+ * then drain that webhook so each test starts from a clean delivery log.
+ */
+async function openWindow(): Promise<void> {
+  engine.simulateInbound({
+    from: '5215555000001',
+    message: { type: 'text', text: { body: 'hola' } },
+  })
+  engine.clock.advance(0)
+  await engine.settle()
+  received.length = 0
+}
+
 afterEach(async () => {
   await app.close()
 })
@@ -53,6 +67,7 @@ const textBody = {
 
 describe('POST /{version}/{phone_number_id}/messages', () => {
   it('accepts a text send and returns Meta’s envelope', async () => {
+    await openWindow()
     const res = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
 
     expect(res.statusCode).toBe(200)
@@ -63,6 +78,7 @@ describe('POST /{version}/{phone_number_id}/messages', () => {
   })
 
   it('accepts any vNN.N version segment — apps pin different versions', async () => {
+    await openWindow()
     // Spec §5.1: real integrations are scattered across v17 through v23.
     for (const version of ['v17.0', 'v19.0', 'v21.0', 'v23.0']) {
       const res = await post(`/${version}/${engine.state.defaultPhoneNumberId}/messages`, textBody)
@@ -162,6 +178,7 @@ describe('POST /__mock/inbound', () => {
 
 describe('POST /__mock/time/advance', () => {
   it('moves the clock and fires the statuses that came due', async () => {
+    await openWindow()
     await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
 
     const res = await post('/__mock/time/advance', { ms: 60_000 })
@@ -180,6 +197,7 @@ describe('POST /__mock/time/advance', () => {
 
 describe('GET /__mock/messages and /__mock/state', () => {
   it('lists everything the app has sent', async () => {
+    await openWindow()
     await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
 
     const res = await get('/__mock/messages')
@@ -207,6 +225,7 @@ describe('GET /__mock/messages and /__mock/state', () => {
 
 describe('POST /__mock/reset', () => {
   it('clears sent messages and the webhook log', async () => {
+    await openWindow()
     await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
 
     const res = await post('/__mock/reset', {})
@@ -216,6 +235,7 @@ describe('POST /__mock/reset', () => {
   })
 
   it('cancels statuses that were still scheduled', async () => {
+    await openWindow()
     await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
     await post('/__mock/reset', {})
 

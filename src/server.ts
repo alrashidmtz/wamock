@@ -59,5 +59,36 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     },
   )
 
+  // --- message templates (spec §5.3) --------------------------------------
+
+  app.post<{ Params: { version: string; wabaId: string } }>(
+    '/:version/:wabaId/message_templates',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const body = (request.body ?? {}) as Record<string, unknown>
+      return reply.send(engine.createTemplate(request.params.wabaId, body))
+    },
+  )
+
+  app.get<{ Params: { version: string; wabaId: string } }>(
+    '/:version/:wabaId/message_templates',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(engine.listTemplates(request.params.wabaId))
+    },
+  )
+
+  app.delete<{ Params: { version: string; wabaId: string }; Querystring: { name?: string } }>(
+    '/:version/:wabaId/message_templates',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const name = request.query.name
+      if (!name) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param name is required' })
+      }
+      return reply.send(engine.deleteTemplate(request.params.wabaId, name))
+    },
+  )
+
   return app
 }

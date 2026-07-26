@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
 import type { WamockEngine } from '../core/engine.js'
+import { TEMPLATE_STATUSES } from '../core/templates.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import type { InboundContent } from '../webhooks/payloads.js'
 
@@ -28,6 +29,8 @@ const InboundSchema = z
   .passthrough()
 
 const AdvanceSchema = z.object({ ms: z.number().int() })
+
+const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) })
 
 /**
  * Turn the control API's friendly shorthand (`{from, text}`) into the message
@@ -86,6 +89,32 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     engine.clock.advance(parsed.data.ms)
     return reply.send({ now: engine.clock.now() })
   })
+
+  /**
+   * Play Meta's reviewer: approve, reject or pause a template on demand.
+   * Scoped to a single language, because that is how Meta scopes it — and
+   * pretending otherwise would hide the trap this mock exists to expose.
+   */
+  app.post<{ Params: { name: string; language: string }; Querystring: { waba_id?: string } }>(
+    '/__mock/templates/:name/:language/transition',
+    async (request, reply) => {
+      const parsed = TransitionSchema.safeParse(request.body)
+      if (!parsed.success) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: `Param to must be one of {${TEMPLATE_STATUSES.join(', ')}}`,
+        })
+      }
+      const wabaId = request.query.waba_id ?? engine.state.defaultWabaId
+      return reply.send(
+        engine.transitionTemplate(
+          wabaId,
+          request.params.name,
+          request.params.language,
+          parsed.data.to,
+        ),
+      )
+    },
+  )
 
   app.get('/__mock/messages', async (_request, reply) =>
     reply.send({ messages: engine.state.outbound() }),

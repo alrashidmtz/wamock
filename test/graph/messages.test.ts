@@ -9,6 +9,15 @@ function engine() {
   return new WamockEngine({ appSecret: 'app-secret', mode: 'frozen', start: EPOCH })
 }
 
+/**
+ * Free-form sends need an open 24h window (see send-gating.test.ts). These
+ * tests are about the send path itself, so every one of them starts from a
+ * customer having written in — the same precondition a real integration has.
+ */
+function openWindow(e: WamockEngine) {
+  e.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
+}
+
 const textBody = (to = '5215555000001') => ({
   messaging_product: 'whatsapp',
   to,
@@ -19,6 +28,7 @@ const textBody = (to = '5215555000001') => ({
 describe('sendMessage — success response', () => {
   it('returns the envelope Meta returns', () => {
     const e = engine()
+    openWindow(e)
     const res = e.sendMessage(e.state.defaultPhoneNumberId, textBody())
 
     expect(res).toMatchObject({
@@ -33,6 +43,7 @@ describe('sendMessage — success response', () => {
     // Meta echoes what you gave it in `input` and returns the canonical form in
     // `wa_id`. Integrations that key off `input` inherit whatever they typed.
     const e = engine()
+    openWindow(e)
     const res = e.sendMessage(e.state.defaultPhoneNumberId, textBody('+52 1 555 500 0001'))
 
     expect(res.contacts[0]!.input).toBe('+52 1 555 500 0001')
@@ -41,8 +52,10 @@ describe('sendMessage — success response', () => {
 
   it('produces the same wamid for the same call sequence after a reset', () => {
     const e = engine()
+    openWindow(e)
     const first = e.sendMessage(e.state.defaultPhoneNumberId, textBody()).messages[0]!.id
     e.reset()
+    openWindow(e)
     const second = e.sendMessage(e.state.defaultPhoneNumberId, textBody()).messages[0]!.id
 
     expect(second).toBe(first)
@@ -50,6 +63,7 @@ describe('sendMessage — success response', () => {
 
   it('records the send for later inspection', () => {
     const e = engine()
+    openWindow(e)
     e.sendMessage(e.state.defaultPhoneNumberId, textBody())
 
     expect(e.state.outbound()).toHaveLength(1)
@@ -139,6 +153,7 @@ describe('sendMessage — validation', () => {
 describe('sendMessage — scheduled delivery statuses', () => {
   it('emits sent then delivered as the clock advances', async () => {
     const e = engine()
+    openWindow(e)
     const wamid = e.sendMessage(e.state.defaultPhoneNumberId, textBody()).messages[0]!.id
 
     e.clock.advance(60_000)
@@ -155,18 +170,28 @@ describe('sendMessage — scheduled delivery statuses', () => {
 
   it('sends each status in its own webhook, with no messages key', async () => {
     const e = engine()
+    openWindow(e)
     e.sendMessage(e.state.defaultPhoneNumberId, textBody())
 
     e.clock.advance(60_000)
     await e.settle()
 
-    for (const delivery of e.deliverer.log()) {
-      expect('messages' in delivery.payload.entry[0]!.changes[0]!.value).toBe(false)
+    const statusWebhooks = e.deliverer
+      .log()
+      .map((d) => d.payload.entry[0]!.changes[0]!.value)
+      .filter((value) => value.statuses !== undefined)
+
+    expect(statusWebhooks).toHaveLength(2)
+    for (const value of statusWebhooks) {
+      // A status webhook carries statuses and nothing else — no empty
+      // `messages` array to make a naive parser look correct.
+      expect('messages' in value).toBe(false)
     }
   })
 
   it('emits nothing before the clock moves', async () => {
     const e = engine()
+    openWindow(e)
     e.sendMessage(e.state.defaultPhoneNumberId, textBody())
     await e.settle()
 
