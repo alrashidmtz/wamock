@@ -297,9 +297,14 @@ immediately. "The webhook never arrived" is invisible until something times out
 ## Docker
 
 ```bash
-docker run -p 4004:4004 ghcr.io/alrashidmtz/wamock \
+docker run -p 4004:4004 ghcr.io/alrashidmtz/wamock:edge \
   --app-secret shhh --webhook-url http://host.docker.internal:3000/webhook
 ```
+
+Two tags: `:edge` tracks `main`, and `:latest` / `:x.y.z` appear once a version
+is released. Images are `linux/amd64` and `linux/arm64`, and each one is
+smoke-tested in CI — pulled, started, and driven through a full message
+lifecycle — before it is considered published.
 
 The image already passes `--host 0.0.0.0`, which it needs to be reachable
 through `-p`. See `examples/docker-compose` for a CI-shaped setup.

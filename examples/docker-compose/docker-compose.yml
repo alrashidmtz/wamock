@@ -1,7 +1,8 @@
 # wamock alongside the app under test, the shape a CI pipeline wants.
 services:
   wamock:
-    image: ghcr.io/alrashidmtz/wamock:latest
+    # :edge tracks main; pin :x.y.z once you want a fixed version.
+    image: ghcr.io/alrashidmtz/wamock:edge
     command:
       - --port=4004
       # Required inside a container; loopback would be unreachable from the
@@ -12,13 +13,9 @@ services:
       - --quiet
     ports:
       - '4004:4004'
-    healthcheck:
-      # Wait for readiness rather than sleeping: a fixed sleep is either too
-      # short on a loaded runner or wasted time on a fast one.
-      test: ['CMD', 'node', '-e', "fetch('http://localhost:4004/__mock/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 2s
-      timeout: 2s
-      retries: 15
+    # No healthcheck here: the image ships one. `service_healthy` below uses it,
+    # so the app waits for readiness instead of sleeping — a fixed sleep is
+    # either too short on a loaded runner or wasted time on a fast one.
 
   app:
     build: ../..

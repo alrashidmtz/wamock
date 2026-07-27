@@ -111,3 +111,50 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # "It built" is not "it runs". Pull the image that was just pushed and
+      # drive a real message through it, so a broken entrypoint or a missing
+      # runtime file is caught here rather than by whoever pulls it first.
+      - name: Smoke test the published image
+        env:
+          IMAGE: ${{ steps.meta.outputs.tags }}
+        run: |
+          TAG="$(echo "$IMAGE" | head -n1)"
+          echo "smoke testing $TAG"
+          docker run -d --name wamock-smoke -p 4004:4004 "$TAG" \
+            --port=4004 --host=0.0.0.0 --app-secret=smoke --quiet
+
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:4004/__mock/state >/dev/null; then break; fi
+            if [ "$i" = "30" ]; then
+              echo "image never became ready" >&2
+              docker logs wamock-smoke >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          # A customer writes in, the app replies, the window then expires and
+          # the reply is refused — the whole point of the tool, in one run.
+          curl -sf -X POST http://127.0.0.1:4004/__mock/inbound \
+            -H 'content-type: application/json' \
+            -d '{"from":"5215555000001","text":"hola"}' >/dev/null
+
+          curl -sf -X POST http://127.0.0.1:4004/v19.0/PNID_DEFAULT/messages \
+            -H 'content-type: application/json' \
+            -d '{"messaging_product":"whatsapp","to":"5215555000001","type":"text","text":{"body":"hi"}}' >/dev/null
+
+          curl -sf -X POST http://127.0.0.1:4004/__mock/time/advance \
+            -H 'content-type: application/json' -d '{"ms":90000000}' >/dev/null
+
+          CODE="$(curl -s -X POST http://127.0.0.1:4004/v19.0/PNID_DEFAULT/messages \
+            -H 'content-type: application/json' \
+            -d '{"messaging_product":"whatsapp","to":"5215555000001","type":"text","text":{"body":"x"}}' \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).error.code))")"
+
+          docker rm -f wamock-smoke >/dev/null
+          if [ "$CODE" != "131047" ]; then
+            echo "expected 131047 outside the 24h window, got $CODE" >&2
+            exit 1
+          fi
+          echo "image works: full lifecycle passed, 131047 returned as expected"
