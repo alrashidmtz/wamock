@@ -66,7 +66,23 @@ jobs:
           registry-url: https://registry.npmjs.org
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance --access public
+
+      # Re-running a release is a normal thing to do — a failed container job,
+      # a retried workflow — and it should not hard-fail on the half that
+      # already succeeded. npm rejects a duplicate version anyway; this turns
+      # that into an explicit skip instead of a red run nobody can act on.
+      - id: published
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          if npm view "wamock@$VERSION" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "wamock@$VERSION is already on npm — skipping publish"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.published.outputs.already == 'false'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
