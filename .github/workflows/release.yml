@@ -173,4 +173,38 @@ jobs:
             echo "expected 131047 outside the 24h window, got $CODE" >&2
             exit 1
           fi
-          echo "image works: full lifecycle passed, 131047 returned as expected"
+          echo "amd64 image works: full lifecycle passed, 131047 returned as expected"
+
+      # The runner is amd64, so the step above only ever exercised half of what
+      # we publish. QEMU is far too slow to build under, but plenty fast enough
+      # to boot an already-built image and confirm it starts and serves —
+      # otherwise "multi-arch" is a claim backed by a build log, not a run.
+      - name: Smoke test the arm64 image under emulation
+        env:
+          IMAGE: ${{ steps.meta.outputs.tags }}
+        run: |
+          TAG="$(echo "$IMAGE" | head -n1)"
+          docker run -d --name wamock-arm64 --platform linux/arm64 -p 4005:4005 "$TAG" \
+            --port=4005 --host=0.0.0.0 --app-secret=smoke --quiet
+
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:4005/__mock/state >/dev/null; then break; fi
+            if [ "$i" = "60" ]; then
+              echo "arm64 image never became ready" >&2
+              docker logs wamock-arm64 >&2
+              exit 1
+            fi
+            sleep 1
+          done
+
+          ARCH="$(docker exec wamock-arm64 node -p "process.arch")"
+          curl -sf -X POST http://127.0.0.1:4005/__mock/inbound \
+            -H 'content-type: application/json' \
+            -d '{"from":"5215555000001","text":"hola"}' >/dev/null
+
+          docker rm -f wamock-arm64 >/dev/null
+          if [ "$ARCH" != "arm64" ]; then
+            echo "expected the arm64 image to report process.arch=arm64, got $ARCH" >&2
+            exit 1
+          fi
+          echo "arm64 image works: booted under emulation, process.arch=$ARCH, accepted an inbound message"

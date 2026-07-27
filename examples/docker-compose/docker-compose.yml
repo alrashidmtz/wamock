@@ -1,4 +1,7 @@
-# wamock alongside the app under test, the shape a CI pipeline wants.
+# wamock alongside the app under test — the shape a CI pipeline wants.
+#
+# Copy this into your own project and point `app.build` at it. The paths here
+# assume it sits next to your Dockerfile.
 services:
   wamock:
     # :edge tracks main; pin :x.y.z once you want a fixed version.
@@ -18,9 +21,15 @@ services:
     # either too short on a loaded runner or wasted time on a fast one.
 
   app:
-    build: ../..
+    # YOUR application. `.` is your project root, not wamock's.
+    build: .
     environment:
-      # Usually the only change needed to test against wamock instead of Meta.
+      # Works only if your Graph client reads a base URL from configuration.
+      # Many do not: we checked two production integrations and BOTH built
+      # their Graph URLs as string literals. If yours does too, this variable
+      # will not help — use `installGraphInterceptor` from `wamock/intercept`
+      # inside your tests instead, which swaps the destination underneath a
+      # client without modifying it.
       GRAPH_API_BASE_URL: http://wamock:4004
       WHATSAPP_PHONE_NUMBER_ID: PNID_DEFAULT
       WHATSAPP_WABA_ID: WABA_DEFAULT

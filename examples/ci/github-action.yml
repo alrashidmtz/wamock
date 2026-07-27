@@ -52,8 +52,11 @@ jobs:
       - name: Run tests
         run: npm test
         env:
-          # Point your Graph client at the mock. This is normally the only
-          # change needed to test against wamock instead of Meta.
+          # Works only if your Graph client reads a base URL from config. Many
+          # do not — we checked two production integrations and BOTH built
+          # their Graph URLs as string literals. If yours does too, this
+          # variable changes nothing: use `installGraphInterceptor` from
+          # `wamock/intercept` in your tests instead.
           GRAPH_API_BASE_URL: http://localhost:4004
           WHATSAPP_PHONE_NUMBER_ID: PNID_DEFAULT
           WHATSAPP_WABA_ID: WABA_DEFAULT
