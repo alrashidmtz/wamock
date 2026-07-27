@@ -18,7 +18,7 @@
     "node": ">=22"
   },
   "bin": {
-    "wamock": "./dist/cli.js"
+    "wamock": "dist/cli.js"
   },
   "main": "./dist/lib.js",
   "types": "./dist/lib.d.ts",
