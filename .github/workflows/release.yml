@@ -9,9 +9,15 @@
 
 name: release
 
+# A manual run publishes ONLY the container image, tagged `edge`. That keeps
+# the container releasable on its own — the two registries have separate
+# credentials and separate failure modes, and one being blocked should not hold
+# the other hostage. No dispatch inputs on purpose: nothing user-supplied
+# reaches a tag or a shell.
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -32,6 +38,7 @@ jobs:
       - run: npm run build
 
       - name: Tag must match package.json version
+        if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF_NAME#v}"
           PKG="$(node -p "require('./package.json').version")"
@@ -42,6 +49,8 @@ jobs:
 
   npm:
     needs: verify
+    # Only on a version tag. A manual run is for the container alone.
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,11 +92,13 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
-          # v0.1.0 -> :0.1.0, :0.1, :latest
+          # Tag push: v0.1.0 -> :0.1.0, :0.1, :latest
+          # Manual run: :edge only, so a dispatch can never move :latest.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - uses: docker/build-push-action@v6
         with:
