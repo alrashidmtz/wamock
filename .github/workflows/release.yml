@@ -81,6 +81,18 @@ jobs:
             echo "already=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Fail here rather than letting npm surface ENEEDAUTH from deep in its
+      # log. A red run is correct when the release did not publish — but it has
+      # to say what to do about it, or people learn to scroll past the colour.
+      - if: steps.published.outputs.already == 'false'
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NPM_TOKEN" ]; then
+            echo "::error title=npm publish is not configured::NPM_TOKEN secret is missing. Either add it under Settings > Secrets and variables > Actions, or set up Trusted Publishing at https://www.npmjs.com/package/wamock/access which needs no token at all. Until then publish by hand: npm publish --access public --otp=<code>"
+            exit 1
+          fi
+
       - if: steps.published.outputs.already == 'false'
         run: npm publish --provenance --access public
         env:
