@@ -75,9 +75,13 @@ export class WebhookDeliverer {
   }
 
   /**
-   * Resolve once every fired delivery has finished. `advance()` returns as soon
-   * as timers have run; the transport promises they started may still be open.
-   * Loops because a transport can itself enqueue more work.
+   * Resolve once every fired delivery has finished.
+   *
+   * The loop terminates without needing a bound, unlike the clock's drain:
+   * a delivery only enters `#inFlight` when a clock timer fires, and in frozen
+   * mode timers fire only from `advance()`, which `settle()` never calls. A
+   * transport that enqueues more work therefore schedules it for a later
+   * `advance()` rather than feeding this loop.
    */
   async settle(): Promise<void> {
     while (this.#inFlight.size > 0) {

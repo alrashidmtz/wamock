@@ -2,6 +2,7 @@ import { WamockEngine } from './core/engine.js'
 import type { ScenarioConfig } from './core/scenario.js'
 import type { TemplateCategory, TemplateStatus } from './core/templates.js'
 import type { OutboundMessage } from './core/types.js'
+import { installGraphInterceptor } from './intercept.js'
 import { createServer } from './server.js'
 import type { InboundContent } from './webhooks/payloads.js'
 import { inProcessTransport } from './webhooks/transport.js'
@@ -33,6 +34,15 @@ export interface CreateWamockOptions {
   start?: number
   /** Shorten the 24h window to make expiry tests cheap. */
   windowMs?: number
+  /**
+   * Redirect `graph.facebook.com` to this mock for the mock's lifetime, and
+   * restore the global `fetch` on `close()`.
+   *
+   * Most Graph clients hardcode the hostname — we checked two production
+   * integrations and neither had a base-URL setting — so this is usually what
+   * you want when the code under test is not configurable.
+   */
+  interceptGraph?: boolean
   phoneNumberId?: string
   wabaId?: string
   displayPhoneNumber?: string
@@ -120,6 +130,15 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
   const app = createServer(engine)
   await app.listen({ port: 0, host: '127.0.0.1' })
   const baseUrl = addressOf(app)
+
+  // Tying the interceptor to the mock's lifetime removes the footgun of a
+  // forgotten restore(), which leaves the global fetch patched for every test
+  // that follows.
+  const restoreInterceptor = options.interceptGraph
+    ? installGraphInterceptor({ baseUrl })
+    : undefined
+
+  let closed = false
 
   /**
    * Advance by zero and settle. Every helper does this so callers never have
@@ -211,6 +230,18 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
     },
 
     async close() {
+      if (closed) return
+      closed = true
+
+      // Order matters. Cancel first so nothing new fires, THEN await what is
+      // already in flight — the other way round lets a delivery start during
+      // the wait and outlive the close. Without this, `afterEach(close)` does
+      // not isolate: one test's webhooks land inside the next one, and the
+      // flakiness looks like it belongs to the code under test.
+      engine.deliverer.clear()
+      await engine.settle()
+
+      restoreInterceptor?.()
       engine.clock.stop()
       await app.close()
     },

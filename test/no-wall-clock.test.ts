@@ -1,5 +1,6 @@
 import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 /**
@@ -15,7 +16,9 @@ import { describe, expect, it } from 'vitest'
  * disabling a plugin.
  */
 
-const SRC = new URL('../src/', import.meta.url).pathname
+// fileURLToPath, not `.pathname`: on Windows the latter yields `/C:/...`,
+// which is not a usable filesystem path.
+const SRC = fileURLToPath(new URL('../src/', import.meta.url))
 const EXEMPT = new Set(['clock.ts'])
 const FORBIDDEN = /\bDate\.now\s*\(|\bnew\s+Date\s*\(\s*\)/
 
@@ -38,7 +41,9 @@ describe('wall-clock discipline', () => {
 
     const offenders: string[] = []
     for (const file of files) {
-      if (EXEMPT.has(file.split('/').pop()!)) continue
+      // basename, not split('/'): `join` uses backslashes on Windows, so the
+      // exemption would never match and the guard would fail there.
+      if (EXEMPT.has(basename(file))) continue
       const contents = await readFile(file, 'utf8')
       for (const [index, line] of contents.split('\n').entries()) {
         if (FORBIDDEN.test(line)) offenders.push(`${file}:${index + 1}: ${line.trim()}`)

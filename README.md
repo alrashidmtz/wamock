@@ -142,14 +142,20 @@ checked two production integrations and **neither** had a base-URL setting.
 So swap the destination underneath instead, without touching the client:
 
 ```ts
-import { installGraphInterceptor } from 'wamock/intercept'
-
-const mock = await createWamock({ appSecret: 'test-secret' })
-const restore = installGraphInterceptor({ baseUrl: mock.baseUrl })
+const mock = await createWamock({ appSecret: 'test-secret', interceptGraph: true })
 
 await myApp.sendWhatsAppMessage(...)   // still calls graph.facebook.com
 
-restore()
+await mock.close()                     // restores the global fetch
+```
+
+Tying it to the mock means a forgotten cleanup cannot leave `fetch` patched for
+every test that follows. If you need it without `createWamock`, the underlying
+helper is still there and returns its own restore function:
+
+```ts
+import { installGraphInterceptor } from 'wamock/intercept'
+const restore = installGraphInterceptor({ baseUrl: mock.baseUrl })
 ```
 
 This patches the global `fetch`. It covers code that uses `fetch`; it does
