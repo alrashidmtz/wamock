@@ -4,7 +4,46 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-28
+
+A quality pass driven by lenses the first reviews had not used: resource
+lifecycle, portability, and — the one that found the most — mutation testing.
+
+### Added
+
+- **`createWamock({ interceptGraph: true })`** — installs the Graph interceptor
+  for the mock's lifetime and restores the global `fetch` on `close()`.
+  Forgetting the manual `restore()` used to leave `fetch` patched for every
+  later test, which surfaces as unrelated tests failing much later.
+- **`npm run test:mutation`** — Stryker across all of `src/`, with a threshold
+  that breaks the build on regression and a weekly CI run.
+
+### Fixed
+
+- **`close()` delivered webhooks after it resolved.** With a slow receiver —
+  which is any real app — deliveries already in flight landed well after the
+  mock was closed, so `afterEach(close)` did not isolate and one test's
+  webhooks arrived inside the next. It now cancels pending timers first, then
+  awaits what is in flight; the reverse order lets a delivery start during the
+  wait and outlive the close. Also idempotent.
+- **The suite could not run on Windows.** The wall-clock guard used
+  `URL.pathname` (which yields `/C:/…`) and `split('/')` against paths built
+  with `join` (backslashes), so its exemption never matched.
+- **Interactive messages accepted an empty `id` or `title`** where Meta rejects
+  them — a `typeof === 'string'` check passes for `""`.
+
+### Changed
+
+- **CI now runs 3 operating systems × Node 22 and 24.** `engines` promised
+  `>=22` on any platform while exactly one combination was tested, and none on
+  macOS, where most of this tool's users are.
+- Test quality is now measured, not assumed. Mutation score went from **72.14%
+  to 77.82%**; the error catalogue specifically went from 43 undetected
+  mutations to 1. Coverage had reported it as fully tested.
+
+## [0.1.0] — 2026-07-27
+
+First release.
 
 ### Added
 
