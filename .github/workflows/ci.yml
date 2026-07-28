@@ -4,9 +4,39 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Mondays, 06:00 UTC — see the mutation job.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
 
 jobs:
   check:
+    # `engines` promises Node >=22 on any platform, so that is what gets
+    # tested. Node 22 is the floor and 24 the current line; macOS matters
+    # because that is where most of this tool's users are, and Windows because
+    # nothing in package.json tells anyone it is unsupported.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [22, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      # typecheck + lint + tests with coverage thresholds enforced
+      - run: npm run check
+      - run: npm run build
+
+  # Weekly rather than per-push: mutation testing takes minutes, and its value
+  # is catching slow erosion of test quality, not gating a single commit.
+  # Breaks below the threshold in stryker.config.json.
+  mutation:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -15,6 +45,10 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      # typecheck + lint + tests with coverage thresholds enforced
-      - run: npm run check
-      - run: npm run build
+      - run: npm run test:mutation
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: reports/mutation/
+          retention-days: 30

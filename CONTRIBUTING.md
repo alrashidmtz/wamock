@@ -32,6 +32,21 @@ and produces failures that appear months later in someone else's CI.
 then implement. Coverage thresholds are enforced at 90% for `src/core`,
 `src/errors` and `src/webhooks`.
 
+**Coverage is not the bar; mutation score is.** `npm run test:mutation` runs
+Stryker, which introduces defects on purpose and reports how many the suite
+fails to notice. It found what coverage could not: `errors/graph-error.ts` had
+100% line coverage and a 48% mutation score — every error message and `type`
+could be reworded and nothing failed, even though that wording is the contract
+integrations match on. It is slow by design, so it is not part of
+`npm run check`; CI runs it weekly and the build breaks below the configured
+threshold.
+
+Not every survivor deserves a test. Pin things that are **observable contract**
+— error codes and wording, payload field names and values, Meta's documented
+limits. Do not pin developer-facing debug text: making that brittle costs
+maintenance without making the product safer. When you decide to leave a
+survivor alone, say why in the test file near the related cases.
+
 **Determinism is a feature.** Ids are derived from a counter, randomness comes
 from a seeded PRNG, and `reset()` rewinds both. A change that makes two
 identical runs produce different output is a regression.

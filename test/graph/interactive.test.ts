@@ -80,6 +80,34 @@ describe('reply buttons', () => {
     expect(codeOf(() => send(engine(), buttons(1, 'x'.repeat(21))))).toBe(100)
   })
 
+  it('rejects an empty reply id or title, not just a missing one', () => {
+    // A client sending `id: ""` passes a `typeof === 'string'` check. Meta
+    // rejects it; so must the mock, or the send looks fine here and 400s there.
+    const e = engine()
+    expect(
+      codeOf(() =>
+        send(e, {
+          type: 'button',
+          body: { text: 'Pick' },
+          action: { buttons: [{ type: 'reply', reply: { id: '', title: 'OK' } }] },
+        }),
+      ),
+    ).toBe(100)
+    expect(
+      codeOf(() =>
+        send(e, {
+          type: 'button',
+          body: { text: 'Pick' },
+          action: { buttons: [{ type: 'reply', reply: { id: 'b', title: '' } }] },
+        }),
+      ),
+    ).toBe(100)
+  })
+
+  it('rejects empty body text', () => {
+    expect(codeOf(() => send(engine(), { ...buttons(1), body: { text: '' } }))).toBe(100)
+  })
+
   it('requires body text', () => {
     const e = engine()
     expect(
@@ -231,6 +259,34 @@ describe('lists', () => {
           type: 'list',
           body: { text: 'C' },
           action: { button: 'Open', sections: [{ rows: [{ id: 'r' }] }] },
+        }),
+      ),
+    ).toBe(100)
+  })
+
+  it('rejects an empty row id or title', () => {
+    const e = engine()
+    for (const row of [{ id: '', title: 'R' }, { id: 'r', title: '' }]) {
+      expect(
+        codeOf(() =>
+          send(e, {
+            type: 'list',
+            body: { text: 'C' },
+            action: { button: 'Open', sections: [{ rows: [row] }] },
+          }),
+        ),
+      ).toBe(100)
+    }
+  })
+
+  it('rejects an empty list button label', () => {
+    const e = engine()
+    expect(
+      codeOf(() =>
+        send(e, {
+          type: 'list',
+          body: { text: 'C' },
+          action: { button: '', sections: [{ rows: [{ id: 'r', title: 'R' }] }] },
         }),
       ),
     ).toBe(100)

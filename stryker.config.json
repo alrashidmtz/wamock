@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Mutation testing answers what coverage cannot: would these tests actually catch a bug? Stryker introduces defects on purpose and reports how many the suite fails to notice. Run with `npm run test:mutation`; it is slow by design and not part of `npm run check`.",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "reporters": [
+    "html",
+    "clear-text",
+    "progress"
+  ],
+  "coverageAnalysis": "perTest",
+  "mutate": [
+    "src/**/*.ts",
+    "!src/**/*.test.ts",
+    "!src/cli.ts",
+    "!src/core/types.ts",
+    "!src/core/context.ts"
+  ],
+  "ignorers": [],
+  "timeoutMS": 20000,
+  "thresholds": {
+    "high": 85,
+    "low": 78,
+    "break": 76
+  }
+}
