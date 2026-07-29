@@ -1,6 +1,6 @@
 {
   "name": "wamock",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A faithful, standalone mock of the WhatsApp Cloud API. Test your integration end-to-end without a WABA.",
   "keywords": [
     "whatsapp",
@@ -42,6 +42,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run check && npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

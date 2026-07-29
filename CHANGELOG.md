@@ -4,7 +4,23 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
-## [0.2.1] — 2026-07-29
+## [0.2.2] — 2026-07-29
+
+### Fixed
+
+- **0.2.1 shipped a stale build.** Its `dist/` was compiled before the hang fix
+  and published alongside sources that contained it, so the package said one
+  thing in TypeScript and did another in JavaScript — and JavaScript is what
+  runs. As published, 0.2.1 behaves exactly like 0.2.0 and still hangs.
+  **Upgrade to 0.2.2**; 0.2.1 has nothing 0.2.0 lacked.
+
+  Root cause: nothing forced a rebuild before publishing. `npm publish` packed
+  whatever happened to be in `dist/`. There is now a `prepublishOnly` hook that
+  runs the full check and a fresh build, so a stale or failing build cannot be
+  published at all. Releases through CI were never affected — that path always
+  built first — which is one more argument for publishing from CI.
+
+## [0.2.1] — 2026-07-29 — **broken, use 0.2.2**
 
 ### Fixed
 
