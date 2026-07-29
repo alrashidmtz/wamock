@@ -116,13 +116,53 @@ describe('control API accepts a JSON body whatever curl labels it', () => {
   })
 
   it('leaves the Graph routes strict, since Meta is the contract there', async () => {
-    const res = await app.inject({
+    // The body is complete and the window is open, so this send would succeed
+    // if the body were read. An incomplete body would have failed for its own
+    // reasons and proved nothing — mutation testing caught exactly that: the
+    // path guard could be mutated away and this still passed.
+    await app.inject({
+      method: 'POST',
+      url: '/__mock/inbound',
+      payload: '{"from":"5215555000001","text":"hola"}',
+      headers: FORM,
+    })
+
+    const payload = JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: '5215555000001',
+      type: 'text',
+      text: { body: 'hola' },
+    })
+
+    const accepted = await app.inject({
+      method: 'POST',
+      url: '/v19.0/PNID_DEFAULT/messages',
+      headers: { 'content-type': 'application/json' },
+      payload,
+    })
+    expect(accepted.statusCode, 'the same body must succeed as JSON').toBe(200)
+
+    const rejected = await app.inject({
       method: 'POST',
       url: '/v19.0/PNID_DEFAULT/messages',
       headers: FORM,
-      payload: '{"messaging_product":"whatsapp","to":"5215555000001","type":"text"}',
+      payload,
+    })
+    expect(rejected.statusCode).toBe(400)
+    expect(JSON.stringify(rejected.json())).toMatch(/Unsupported content type/)
+  })
+
+  it('treats an empty body as an empty object rather than a parse error', async () => {
+    // `/__mock/reset` takes `{}`, and `curl -X POST .../__mock/reset` with no
+    // -d at all sends nothing. Failing that with "not valid JSON" would be
+    // technically true and useless.
+    const res = await app.inject({
+      method: 'POST',
+      url: '/__mock/reset',
+      headers: FORM,
+      payload: '',
     })
 
-    expect(res.statusCode).toBeGreaterThanOrEqual(400)
+    expect(res.statusCode).toBe(200)
   })
 })
