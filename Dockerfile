@@ -13,7 +13,12 @@ FROM --platform=$BUILDPLATFORM node:22-alpine AS build
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+# --ignore-scripts: `prepare` runs `npm run build`, and at this layer only
+# package*.json exists — tsconfig and src arrive below. Copying them first
+# would fix the error and destroy dependency-layer caching, so skip the hook
+# instead. We build explicitly a few lines down anyway. Safe because no
+# production dependency has install scripts (fastify and zod are pure JS).
+RUN npm ci --ignore-scripts
 
 COPY tsconfig*.json ./
 COPY src ./src
@@ -21,7 +26,7 @@ RUN npm run build
 
 # Production dependency tree, resolved once. Safe to copy across architectures
 # precisely because nothing in it is compiled.
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # --- runtime (per architecture) ----------------------------------------------
 FROM node:22-alpine
