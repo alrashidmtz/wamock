@@ -90,4 +90,9 @@ async function reply(to, text) {
   console.log('sent', (await response.json()).messages[0].id)
 }
 
-app.listen(3000, () => console.log('receiver listening on http://localhost:3000/webhook'))
+// PORT so this can be started twice, or on a machine where 3000 is taken —
+// and so the smoke test can run it on a port it picks. 3000 stays the default
+// because that is the number the README and the compose file both use.
+const PORT = Number(process.env.PORT ?? 3000)
+
+app.listen(PORT, () => console.log(`receiver listening on http://localhost:${PORT}/webhook`))

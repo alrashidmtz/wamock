@@ -13,11 +13,12 @@
  *
  * Written in Node rather than shell because CI runs it on Windows too.
  */
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { createServer, connect } from 'node:net'
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
 const workdir = mkdtempSync(join(tmpdir(), 'wamock-smoke-'))
@@ -29,6 +30,34 @@ function fail(message) {
   process.stderr.write(`\nPACKAGE SMOKE TEST FAILED: ${message}\n`)
   rmSync(workdir, { recursive: true, force: true })
   process.exit(1)
+}
+
+
+/** An OS-assigned free port, so a busy 3000 cannot fail the release. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = createServer()
+    probe.on('error', reject)
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address()
+      probe.close(() => resolve(port))
+    })
+  })
+}
+
+/** Poll the port rather than sleeping: a fixed wait is wrong on both ends. */
+async function waitForListening(port, timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const open = await new Promise((resolve) => {
+      const socket = connect(port, '127.0.0.1')
+      socket.on('connect', () => (socket.end(), resolve(true)))
+      socket.on('error', () => resolve(false))
+    })
+    if (open) return
+    if (Date.now() > deadline) fail(`nothing listening on ${port} after ${timeoutMs}ms`)
+    await new Promise((r) => setTimeout(r, 200))
+  }
 }
 
 try {
@@ -113,6 +142,69 @@ process.exit(0)
     fail(`the shipped vitest example does not pass:\n${result}`)
   }
   process.stdout.write('shipped example passes\n')
+
+  // The Express example, driven the way a reader would drive it. It is the only
+  // shipped example that is a running server rather than a test, and nothing
+  // executed it — the same gap that let the vitest example ship broken above.
+  //
+  // wamock runs in-process here rather than as a second child. One subprocess
+  // is one thing that can fail to die on Windows; two is a flaky release gate.
+  process.stdout.write('running the shipped express example against the package...\n')
+  run('npm', ['install', 'express', '--no-audit', '--no-fund'], workdir)
+  copyFileSync(join(repoRoot, 'examples', 'express', 'server.mjs'), join(workdir, 'server.mjs'))
+
+  // The mock comes up first: the receiver needs its address to reply to, and
+  // in library mode that is an ephemeral port, not the 4004 the example
+  // defaults to.
+  const receiverPort = await freePort()
+  const { createWamock } = await import(
+    pathToFileURL(join(workdir, 'node_modules', 'wamock', 'dist', 'lib.js')).href
+  )
+  const mock = await createWamock({
+    appSecret: 'shhh',
+    webhookUrl: `http://127.0.0.1:${receiverPort}/webhook`,
+  })
+
+  const receiver = spawn(process.execPath, ['server.mjs'], {
+    cwd: workdir,
+    env: {
+      ...process.env,
+      PORT: String(receiverPort),
+      WA_APP_SECRET: 'shhh',
+      GRAPH_API_BASE_URL: mock.baseUrl,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let receiverLog = ''
+  receiver.stdout.on('data', (d) => (receiverLog += d))
+  receiver.stderr.on('data', (d) => (receiverLog += d))
+
+  try {
+    await waitForListening(receiverPort)
+
+    await mock.inbound({ from: '5215555000001', text: 'hola' })
+
+    // The example replies through the Graph API, so the reply landing in
+    // wamock is the proof the whole loop closed: signature verified over the
+    // raw body, webhook parsed, response sent back.
+    //
+    // Polled, not awaited. The virtual clock orders wamock's own timers and
+    // knows nothing about an HTTP round trip to another process — advancing it
+    // and reading once checked before the reply could possibly have arrived.
+    let replied = false
+    for (let i = 0; i < 60 && !replied; i++) {
+      replied = mock.messages().some((m) => m.payload?.text?.body === 'You said: hola')
+      if (!replied) await new Promise((r) => setTimeout(r, 250))
+    }
+
+    if (!replied) {
+      fail(`the express example never replied. Receiver output:\n${receiverLog}`)
+    }
+    process.stdout.write('shipped express example completes the round trip\n')
+  } finally {
+    receiver.kill()
+    await mock.close()
+  }
 } catch (error) {
   const detail = error.stdout || error.stderr || error.message
   fail(String(detail).trim())
