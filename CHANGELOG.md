@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.7] — 2026-07-29
+
+### Changed
+
+- **Releases publish through Trusted Publishing (OIDC).** No token is stored
+  anywhere, and npm attests which workflow and commit produced the tarball. The
+  publish job moved to Node 24 for one reason: OIDC needs npm >= 11.5.1 and
+  Node 22 still bundles 10.9.x, which fails with an authentication error that
+  never mentions npm's version. Guarded explicitly so a runner-image change
+  says so instead of failing cryptically. The README documents the one-time
+  setup.
+
 ## [0.2.6] — 2026-07-29
 
 ### Added
