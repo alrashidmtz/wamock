@@ -475,6 +475,28 @@ people would, it gets built.
 No email form. Starring the repo and opening issues tells us more than a
 signup would, and you get the tool either way.
 
+## Releasing
+
+`git tag vX.Y.Z && git push origin vX.Y.Z` publishes both npm and the container
+image. The npm half authenticates through **Trusted Publishing** (OIDC) — no
+token is stored anywhere, and npm attests which workflow and commit produced
+the tarball.
+
+Configured once, at
+[npmjs.com/package/wamock/access](https://www.npmjs.com/package/wamock/access) →
+*Trusted Publisher*:
+
+| Field | Value |
+|---|---|
+| Repository | `alrashidmtz/wamock` |
+| Workflow filename | `release.yml` |
+| Environment | *(leave empty)* |
+
+One requirement that is easy to miss: OIDC needs **npm ≥ 11.5.1**, and Node 22
+still bundles 10.9.x. The publish job runs on Node 24 for that reason alone, and
+guards the version explicitly so a regression says so instead of failing with an
+authentication error that never mentions npm's version.
+
 ## Contributing
 
 Bug reports about **fidelity** are the most valuable kind: if wamock accepts

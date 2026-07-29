@@ -61,11 +61,29 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@v4
+      # Node 24, not 22, purely for the npm it ships. Trusted Publishing
+      # authenticates over OIDC and needs npm >= 11.5.1; Node 22 bundles
+      # 10.9.x, which fails with an error that does not mention the version.
+      # Which Node publishes is irrelevant to the artifact — the CI matrix is
+      # what proves the package runs on 22.
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      - name: npm must be new enough for Trusted Publishing
+        run: |
+          NPM="$(npm --version)"
+          MAJOR="${NPM%%.*}"
+          REST="${NPM#*.}"
+          MINOR="${REST%%.*}"
+          if [ "$MAJOR" -lt 11 ] || { [ "$MAJOR" -eq 11 ] && [ "$MINOR" -lt 5 ]; }; then
+            echo "::error title=npm too old for OIDC::npm $NPM cannot use Trusted Publishing (needs >= 11.5.1). Bump node-version, or add 'npm install -g npm@latest' before this step."
+            exit 1
+          fi
+          echo "npm $NPM supports Trusted Publishing"
+
       - run: npm ci
       - run: npm run build
 
