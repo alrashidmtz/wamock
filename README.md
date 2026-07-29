@@ -13,6 +13,11 @@ MIT licensed. Node 22+. Two runtime dependencies.
 npx wamock start --app-secret shhh --webhook-url http://localhost:3000/webhook
 ```
 
+> **pnpm users:** ask for the version explicitly — `pnpm add -D wamock@latest`.
+> pnpm's `minimumReleaseAge` policy skips packages published very recently, so a
+> plain `pnpm add wamock` can resolve to an older release that predates features
+> documented here.
+
 ```bash
 curl -X POST localhost:4004/__mock/inbound \
   -H 'content-type: application/json' \
@@ -131,6 +136,21 @@ await mock.reset()
 Time is virtual and frozen by default, so tests are deterministic — the same
 script produces the same message ids on every run.
 
+**That freeze also holds back delivery statuses.** Meta sends `sent` /
+`delivered` as webhooks *after* the send, never as its response, and here they
+are due at a virtual instant that never arrives on its own:
+
+```ts
+await mock.send({ to, text: 'hola' })
+// no status webhooks yet — the clock has not moved
+
+await mock.time.advance(60_000)
+// now `sent` and `delivered` have been delivered to onWebhook
+```
+
+Assert on statuses without advancing and you get zero of them, which reads like
+a broken mock rather than a stopped clock.
+
 `mock.baseUrl` also serves real HTTP, so an app that only knows how to talk to a
 URL can be pointed at it in the same test.
 
@@ -200,6 +220,61 @@ This patches the global `fetch`. It covers code that uses `fetch`; it does
 **not** cover `axios`, `node-fetch` or raw `http.request` — those need their own
 base URL or an HTTP proxy.
 
+#### Create your client *after* the mock
+
+Patching a global only reaches code that reads that global **at call time**. A
+client that captures `fetch` once — a very common shape, because it is how you
+make the transport injectable while keeping a sane default — keeps whatever was
+there when it was constructed:
+
+```ts
+class GraphClient {
+  constructor(private readonly transport = globalThis.fetch) {}   // captured here
+}
+```
+
+```ts
+const client = new GraphClient()                                  // ✗ holds the real fetch
+const mock = await createWamock({ appSecret: 's', interceptGraph: true })
+```
+
+```ts
+const mock = await createWamock({ appSecret: 's', interceptGraph: true })
+const client = new GraphClient()                                  // ✓ holds the patched one
+```
+
+Get the order wrong and the interception silently does nothing: the client still
+talks to `graph.facebook.com`. **If a valid access token is present in the
+environment, that means the test sends real WhatsApp messages to real numbers** —
+so treat this as a correctness *and* a safety issue, not a nuisance. A quick way
+to catch it: assert that the mock saw the traffic (`mock.expectSent(...)` or
+`mock.messages()`), which fails loudly when nothing was intercepted.
+
+#### Your app's clock is not wamock's clock
+
+`time.advance()` moves the clock **inside the mock** — conversation windows,
+pending statuses, token expiry. It cannot move the `Date.now()` your own code
+calls, so an app that decides "is the window still open?" from the system clock
+does not notice the jump:
+
+```ts
+const DAY_PLUS = 25 * 60 * 60 * 1000
+
+await mock.time.advance(DAY_PLUS)     // Meta considers the window closed…
+// …but your app still reads a session that looks 5 seconds old
+```
+
+Whatever your app uses to remember the last inbound has to be aged too, or the
+two sides describe different worlds and the test proves nothing:
+
+```ts
+await mock.time.advance(DAY_PLUS)
+sessions.set(customer, new Date(Date.now() - DAY_PLUS))   // age your side too
+```
+
+Injecting `mock.time.now` as your app's clock removes the problem entirely, and
+is worth doing if the code is yours to change.
+
 ---
 
 ## Fidelity
@@ -245,14 +320,17 @@ across v17 through v23.
 
 ### Control API — what Meta doesn't give you
 
-| Endpoint | What it does |
-|---|---|
-| `POST /__mock/inbound` | a customer writes; opens/renews the 24h window |
-| `POST /__mock/statuses` | force a message to `read` / `failed` |
-| `POST /__mock/time/advance` | move the virtual clock; fires everything due |
-| `POST /__mock/templates/{name}/{language}/transition` | play Meta's reviewer |
-| `POST /__mock/scenario` | latency, failure rates, duplication, ordering |
-| `POST /__mock/reset` · `GET /__mock/state` · `GET /__mock/messages` | inspect and reset |
+| Endpoint | Body | What it does |
+|---|---|---|
+| `POST /__mock/inbound` | `{ from, text \| buttonReply \| listReply, name?, phoneNumberId? }` | a customer writes; opens/renews the 24h window |
+| `POST /__mock/statuses` | `{ id, status, error? }` — `id` is the **message id** returned by the send | force a message to `read` / `failed` |
+| `POST /__mock/time/advance` | `{ ms }` | move the virtual clock; fires everything due |
+| `POST /__mock/templates/{name}/{language}/transition` | `{ to }` | play Meta's reviewer |
+| `POST /__mock/scenario` | see [Scenario knobs](#scenario-knobs) | latency, failure rates, duplication, ordering |
+| `POST /__mock/reset` · `GET /__mock/state` · `GET /__mock/messages` | — | inspect and reset |
+
+A body that does not match returns Meta's `100` (invalid parameter) with the
+failing field in `details`, so a `400` here usually means a key name, not a bug.
 
 ### Tech Provider mode
 
