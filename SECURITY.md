@@ -34,6 +34,29 @@ That is the intended power of the tool, and the reason it binds loopback.
 | **Outbound HTTP is bounded** | Webhook delivery and the startup handshake time out, so a hung receiver cannot wedge the mock. |
 | **Retained history is capped** | Bounded memory, with the dropped count reported rather than truncating silently. |
 
+## The one way wamock can cause real-world harm
+
+`installGraphInterceptor` (and `createWamock({ interceptGraph: true })`) patches
+the global `fetch`. That only reaches code which reads the global **on every
+call**. A client that captures it once — `constructor(transport =
+globalThis.fetch)`, an ordinary dependency-injection default — keeps the
+original if it was constructed before the mock.
+
+Interception then does nothing **and reports nothing**. Requests go to the real
+`graph.facebook.com`. If a valid access token is present in the environment,
+which it often is on a developer machine, a test run sends **real WhatsApp
+messages to real phone numbers**.
+
+wamock cannot detect this: it has no way to see a `fetch` reference something
+else already holds. Two things protect you, and both are on your side:
+
+1. **Construct the client after the mock**, so it captures the patched global.
+2. **Assert the traffic arrived** — `expect(mock.messages()).toHaveLength(n)`.
+   An empty inbox is the only signal that the requests escaped.
+
+If you cannot control construction order, do not intercept: point the client at
+`mock.baseUrl` instead.
+
 ## Please don't
 
 - Run it on a shared network, or expose it through a tunnel or reverse proxy.
