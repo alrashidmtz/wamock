@@ -134,6 +134,44 @@ script produces the same message ids on every run.
 `mock.baseUrl` also serves real HTTP, so an app that only knows how to talk to a
 URL can be pointed at it in the same test.
 
+### API reference
+
+`createWamock(options)`:
+
+| Option | Default | What it does |
+|---|---|---|
+| `appSecret` | *required* | Signs outgoing webhooks; your app verifies against it |
+| `onWebhook` | — | Called with every webhook. This is what replaces a listening server |
+| `webhookUrl` | — | Also POST webhooks here, for an app that cannot take a callback |
+| `interceptGraph` | `false` | Redirect `graph.facebook.com` here; restored on `close()` |
+| `start` | now | Starting virtual time. Pin it for byte-identical runs |
+| `windowMs` | 24h | Shorten the service window so expiry tests are cheap |
+| `settleTimeoutMs` | 5000 | How long each helper waits for your receiver before giving up |
+| `phoneNumberId` | `PNID_DEFAULT` | Override the seeded number, to match your app's config |
+| `wabaId` | `WABA_DEFAULT` | Override the seeded WABA |
+| `displayPhoneNumber` | `15550001111` | The business number, digits only |
+
+The returned `mock`:
+
+| Member | What it does |
+|---|---|
+| `inbound({ from, text \| buttonReply \| listReply, name?, phoneNumberId? })` | A customer writes; opens the 24h window |
+| `send({ to, text \| template \| interactive, phoneNumberId? })` | Send as your app would; rejects with Meta's error code |
+| `time.advance(ms)` · `time.now()` | Move virtual time; everything due fires |
+| `approveTemplate({ name, language, category? })` | Create a template already APPROVED |
+| `transitionTemplate({ name, language, to })` | Play Meta's reviewer: APPROVED, PAUSED, REJECTED… |
+| `expectSent(criteria)` | Assert on sent traffic; returns the match, throws with what *was* sent |
+| `messages()` | Everything sent, for custom assertions |
+| `scenario(config)` | Latency, failure rates, duplication, ordering, forced errors |
+| `reset()` | Back to the seed state |
+| `close()` | Stop everything and restore anything it patched |
+| `baseUrl` · `phoneNumberId` · `wabaId` | Point a URL-only app at the mock |
+| `engine` | The full engine, for anything the helpers do not cover |
+
+`settleTimeoutMs` exists because every helper waits for the webhooks it
+triggered, and that wait is on *your* receiver. A receiver that never resolves
+would otherwise freeze the call with no output at all.
+
 ### If your client hardcodes `graph.facebook.com`
 
 Most do. Nobody adds configuration for a hostname that never changes — we
