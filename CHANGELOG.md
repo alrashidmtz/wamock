@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.9] — 2026-07-28
+
+Documentation and release-pipeline fixes; no code changes.
+
+- The container job now waits on npm for a tagged release. 0.2.5 and 0.2.7
+  published an image while npm rejected the publish, so a version number meant
+  different things depending on which registry you asked. Both entries below now
+  say so; previously 0.2.5 read as an ordinary release.
+- Corrected eight release dates that were a day ahead.
+
+Published under npm's strictest publishing access — 2FA required, tokens
+disallowed — which this release exists partly to prove is compatible with
+Trusted Publishing.
+
 ## [0.2.8] — 2026-07-28
 
 ### Fixed
