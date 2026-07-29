@@ -1,5 +1,10 @@
 # wamock
 
+[![npm](https://img.shields.io/npm/v/wamock)](https://www.npmjs.com/package/wamock)
+[![ci](https://img.shields.io/github/actions/workflow/status/alrashidmtz/wamock/ci.yml?branch=main&label=ci)](https://github.com/alrashidmtz/wamock/actions/workflows/ci.yml)
+[![node](https://img.shields.io/node/v/wamock)](https://nodejs.org)
+[![license](https://img.shields.io/npm/l/wamock)](./LICENSE)
+
 **Test your WhatsApp Cloud API integration without a WABA.**
 
 A faithful, standalone mock of Meta's WhatsApp Cloud API. It plays both sides:
@@ -13,12 +18,14 @@ MIT licensed. Node 22+. Two runtime dependencies.
 npx wamock@latest start --app-secret shhh --webhook-url http://localhost:3000/webhook
 ```
 
-<sub>Pin `@latest` deliberately — **pnpm users especially**: `pnpm add -D
-wamock@latest`. pnpm's `minimumReleaseAge` skips packages published very
-recently as a supply-chain measure, so a plain `pnpm add wamock` can resolve to
-an older release that predates the features documented here. A warm cache can
-do the same. Landing on 0.1.0 and wondering where `interceptGraph` went is a bad
-first ten minutes.</sub>
+<sub>**pnpm users:** pin the exact version — `pnpm add -D wamock@<version>`,
+using the version in the npm badge above. pnpm's `minimumReleaseAge` skips
+recently published packages as a supply-chain measure, and it filters by publish
+age rather than by tag, so **`wamock@latest` does not get around it** — it
+resolves to whatever is old enough, which today means 0.1.0. An exact version
+does, as does `--config.minimumReleaseAge=0` if you would rather not pin.
+npm and a plain `npx wamock@latest` are unaffected. Landing on 0.1.0 and
+wondering where `interceptGraph` went is a bad first ten minutes.</sub>
 
 ```bash
 curl -X POST localhost:4004/__mock/inbound \

@@ -4,6 +4,19 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.10] — 2026-07-28
+
+Documentation only.
+
+- The README told pnpm users to run `pnpm add -D wamock@latest` to get around
+  `minimumReleaseAge`. Measured: it does not work. That setting filters by
+  publish age, not by dist-tag, so `@latest` still resolves to 0.1.0. Pinning an
+  exact version does, and so does `--config.minimumReleaseAge=0`; the note now
+  says that, and says npm and `npx` are unaffected. The README ships inside the
+  package, so the wrong advice was on the npm page until this release.
+- Added npm version, CI, Node and license badges. All read live state — a
+  hardcoded version badge would drift the same way the advice above did.
+
 ## [0.2.9] — 2026-07-28
 
 Documentation and release-pipeline fixes; no code changes.
