@@ -8,7 +8,10 @@
  * Run it with: vitest run
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { createWamock, type Wamock } from 'wamock'
+// Import at the top, never inside the handler. A dynamic import in a callback
+// that the mock is awaiting deadlocks under vitest's module runner — and it is
+// poor practice regardless, since the handler runs on every webhook.
+import { createWamock, verifySignature, type Wamock } from 'wamock'
 
 const HOURS = (n: number) => n * 60 * 60 * 1000
 const CUSTOMER = '5216691112233' // note: no '+', exactly as Meta sends it
@@ -21,7 +24,6 @@ function buildApp(mock: () => Wamock) {
   return {
     async handleWebhook(rawBody: string, signature: string | undefined) {
       // Verify against the RAW bytes — never a re-serialized object.
-      const { verifySignature } = await import('wamock')
       if (!verifySignature('test-secret', rawBody, signature)) {
         throw new Error('bad signature')
       }

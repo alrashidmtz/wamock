@@ -96,6 +96,20 @@ process.exit(0)
     fail(`the CLI reports version ${reported} but the package is ${expected}`)
   }
   process.stdout.write(`CLI reports the packaged version (${reported})\n`)
+
+  // The shipped example, run against the shipped package. It had never been
+  // executed and four of its six tests hung: it imported inside the webhook
+  // handler, and duplicate deliveries deadlocked two handlers against each
+  // other. Documentation that ships is documentation that must run.
+  process.stdout.write('running the shipped vitest example against the package...\n')
+  run('npm', ['install', 'vitest', '--no-audit', '--no-fund'], workdir)
+  const example = join(repoRoot, 'examples', 'vitest', 'whatsapp-flow.test.ts')
+  run('node', ['-e', `require('fs').copyFileSync(${JSON.stringify(example)}, 'whatsapp-flow.test.ts')`], workdir)
+  const result = run('npx', ['vitest', 'run', 'whatsapp-flow.test.ts'], workdir)
+  if (!/\d+ passed/.test(result) || /failed/.test(result)) {
+    fail(`the shipped vitest example does not pass:\n${result}`)
+  }
+  process.stdout.write('shipped example passes\n')
 } catch (error) {
   const detail = error.stdout || error.stderr || error.message
   fail(String(detail).trim())

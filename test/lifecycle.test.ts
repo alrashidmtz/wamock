@@ -117,6 +117,78 @@ describe('close() stops everything it started', () => {
   })
 })
 
+describe('replying from inside a webhook handler', () => {
+  it('does not deadlock — the most natural test pattern there is', async () => {
+    // "When a message arrives, reply" is what every integration test does, and
+    // it used to hang: inbound() waits for the handler, and the handler's
+    // send() waits for the same drain from inside it. The shipped vitest
+    // example was written this way and had never been run.
+    let mock: Wamock
+    mock = await createWamock({
+      appSecret: 's',
+      start: EPOCH,
+      onWebhook: async (delivery) => {
+        const value = JSON.parse(delivery.body).entry[0].changes[0].value
+        if (!value.messages) return
+        await mock.send({ to: value.messages[0].from, text: `You said: ${value.messages[0].text.body}` })
+      },
+    })
+
+    await mock.inbound({ from: '5215555000001', text: 'hola' })
+
+    mock.expectSent({ to: '5215555000001', text: 'You said: hola' })
+    await mock.close()
+  })
+
+  it('survives duplicate deliveries whose handlers both reply', async () => {
+    // Under at-least-once, the same inbound arrives twice and BOTH copies run
+    // the handler. Each reply waited for the drain the other was holding —
+    // mutual re-entrancy — so the call burned the whole settle timeout doing
+    // nothing. A nested flush now defers to the outer one.
+    let mock: Wamock
+    mock = await createWamock({
+      appSecret: 's',
+      start: EPOCH,
+      onWebhook: async (delivery) => {
+        const value = JSON.parse(delivery.body).entry[0].changes[0].value
+        if (!value.messages) return
+        await mock.send({ to: value.messages[0].from, text: 'reply' })
+      },
+    })
+    mock.scenario({ duplicateWebhooks: true })
+
+    const started = Date.now()
+    await mock.inbound({ from: '5215555000001', text: 'hola' })
+
+    expect(Date.now() - started).toBeLessThan(2_000)
+    expect(mock.messages().length).toBeGreaterThan(0)
+    await mock.close()
+  })
+
+  it('still delivers the statuses for a reply sent from the handler', async () => {
+    const statuses: string[] = []
+    let mock: Wamock
+    mock = await createWamock({
+      appSecret: 's',
+      start: EPOCH,
+      onWebhook: async (delivery) => {
+        const value = JSON.parse(delivery.body).entry[0].changes[0].value
+        if (value.statuses) {
+          statuses.push(value.statuses[0].status)
+          return
+        }
+        await mock.send({ to: value.messages[0].from, text: 'reply' })
+      },
+    })
+
+    await mock.inbound({ from: '5215555000001', text: 'hola' })
+    await mock.time.advance(60_000)
+
+    expect(statuses).toEqual(['sent', 'delivered'])
+    await mock.close()
+  })
+})
+
 describe('the Graph interceptor can be tied to the mock', () => {
   it('installs on request and restores on close()', async () => {
     // Forgetting restore() leaves the global fetch patched for every later

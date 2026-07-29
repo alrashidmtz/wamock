@@ -4,6 +4,21 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.4] — 2026-07-29
+
+### Fixed
+
+- **Replying from a webhook handler stalled when deliveries were duplicated.**
+  Under at-least-once, both copies of an inbound run your handler; each reply
+  called `send()`, which waited for the drain the other copy was holding. The
+  call burned the whole settle timeout doing nothing. A nested flush now defers
+  to the one already running — the outer drain sees the work regardless.
+- **The shipped vitest example never worked.** It imported inside the webhook
+  handler, which deadlocks under vitest's module runner and is poor practice
+  besides. Four of its six tests hung. It is now a top-level import, and
+  `npm run test:package` runs the example against the packaged build on every
+  push, so documentation that ships is documentation that runs.
+
 ## [0.2.3] — 2026-07-29
 
 ### Fixed

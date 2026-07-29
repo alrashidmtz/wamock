@@ -159,9 +159,21 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
    * Bounded, because settling waits on the caller's own receiver. A hang there
    * leaves nothing to read; a late delivery is at least diagnosable.
    */
+  let flushing = false
   const flush = async (): Promise<void> => {
-    engine.clock.advance(0)
-    await settleWithin(engine, settleTimeoutMs)
+    // A nested flush defers to the one already running. Handlers reply by
+    // calling send(), which flushes again from inside the drain it is part of;
+    // with duplicate deliveries, two handlers each wait for the drain the
+    // other is holding. The outer flush sees their work anyway, so waiting
+    // here only burned the settle timeout.
+    if (flushing) return
+    flushing = true
+    try {
+      engine.clock.advance(0)
+      await settleWithin(engine, settleTimeoutMs)
+    } finally {
+      flushing = false
+    }
   }
 
   return {
