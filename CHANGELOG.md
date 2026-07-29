@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.3] — 2026-07-29
+
+### Fixed
+
+- **`wamock --version` reported 0.1.0 from 0.2.0 onward.** The number was
+  duplicated in the CLI as a literal and nothing updated it. It now reads
+  `package.json`, so there is one source of truth — and the package smoke test
+  asserts the CLI agrees with the tarball it came from. Version output is what
+  people paste into bug reports; letting it drift means diagnoses start from a
+  false fact.
+- **The CLI printed a stack trace when its output pipe closed early.** An
+  unhandled `EPIPE` looks like a crash in wamock rather than the reader simply
+  going away.
+
 ## [0.2.2] — 2026-07-29
 
 ### Fixed

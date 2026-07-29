@@ -86,6 +86,16 @@ process.exit(0)
   )
 
   process.stdout.write(run(process.execPath, [probe], workdir))
+
+  // Identity, not just behaviour. `wamock --version` reported 0.1.0 from 0.2.0
+  // onward because the number was duplicated in the CLI and never updated —
+  // and that is exactly the string people paste into bug reports.
+  const expected = JSON.parse(run('npm', ['pkg', 'get', 'version'], repoRoot).trim())
+  const reported = run(process.execPath, [join(workdir, 'node_modules', 'wamock', 'dist', 'cli.js'), '--version'], workdir).trim()
+  if (reported !== expected) {
+    fail(`the CLI reports version ${reported} but the package is ${expected}`)
+  }
+  process.stdout.write(`CLI reports the packaged version (${reported})\n`)
 } catch (error) {
   const detail = error.stdout || error.stderr || error.message
   fail(String(detail).trim())

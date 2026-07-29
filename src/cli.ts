@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs'
+
 import { DEFAULT_HOST, HELP_TEXT, NON_LOOPBACK_HOSTS, parseArgs } from './cli-args.js'
 import { WamockEngine } from './core/engine.js'
 import { createServer } from './server.js'
@@ -11,9 +13,41 @@ import { httpTransport } from './webhooks/transport.js'
  * which are tested without spawning anything.
  */
 
-const VERSION = '0.1.0'
+/**
+ * Read from package.json rather than duplicated here.
+ *
+ * It used to be a literal, and nothing updated it: `wamock --version` reported
+ * 0.1.0 from 0.2.0 onward. That is the worst string to let drift — it is what
+ * people paste into bug reports, so a diagnosis would start from a false fact.
+ *
+ * `../package.json` resolves to the package root from `dist/cli.js` and to the
+ * repo root when running the sources directly, so both paths work.
+ */
+const VERSION: string = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
+    version: string
+  }
+).version
+
+/**
+ * A closed pipe is not an error worth a stack trace.
+ *
+ * `wamock --help | somecommand` where the reader exits immediately makes the
+ * next write raise EPIPE, and an unhandled one prints a crash that looks like
+ * a bug in wamock. Exiting quietly is what the reader asked for.
+ */
+function ignoreBrokenPipe(): void {
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EPIPE') process.exit(0)
+      throw error
+    })
+  }
+}
 
 async function main(argv: string[]): Promise<number> {
+  ignoreBrokenPipe()
+
   let parsed
   try {
     parsed = parseArgs(argv)
