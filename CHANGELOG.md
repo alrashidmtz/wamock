@@ -4,7 +4,21 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
-## [0.2.7] — 2026-07-29
+## [0.2.8] — 2026-07-29
+
+### Fixed
+
+- **`package.json` declared no `repository`**, so publishing with provenance
+  failed: the attestation records the source repo and the registry rejects a
+  package whose manifest disagrees. Adding it also gives the npm page its
+  Repository and Issues links, which were simply missing. `homepage` and `bugs`
+  came along for the same reason.
+- The release workflow's failure annotation assumed every publish failure was
+  an authentication problem. The provenance rejection above proved otherwise —
+  OIDC had already succeeded — so it now points at npm's actual error instead
+  of guessing.
+
+## [0.2.7] — 2026-07-29 — **not published** (provenance rejected the manifest)
 
 ### Changed
 

@@ -114,7 +114,7 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           if ! npm publish --provenance --access public; then
-            echo "::error title=npm publish failed::Authenticate CI one of two ways. Preferred: Trusted Publishing at https://www.npmjs.com/package/wamock/access — link this repo and release.yml, no token to store or rotate. Alternative: add an NPM_TOKEN secret under Settings > Secrets and variables > Actions. To publish this version by hand right now: npm publish --access public --otp=<code>"
+            echo "::error title=npm publish failed::Read npm's error above — it is the specific one. If it says ENEEDAUTH or E401, CI is not authenticated: configure Trusted Publishing at https://www.npmjs.com/package/wamock/access (repository alrashidmtz/wamock, workflow release.yml, allow npm publish), or add an NPM_TOKEN secret. If it says E422 about provenance, package.json and the source repo disagree. To publish by hand meanwhile: npm publish --access public --otp=<code>"
             exit 1
           fi
 

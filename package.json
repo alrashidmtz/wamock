@@ -1,6 +1,6 @@
 {
   "name": "wamock",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "A faithful, standalone mock of the WhatsApp Cloud API. Test your integration end-to-end without a WABA.",
   "keywords": [
     "whatsapp",
@@ -13,6 +13,14 @@
     "webhook"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alrashidmtz/wamock.git"
+  },
+  "homepage": "https://github.com/alrashidmtz/wamock#readme",
+  "bugs": {
+    "url": "https://github.com/alrashidmtz/wamock/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22"
