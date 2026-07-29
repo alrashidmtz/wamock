@@ -1,0 +1,16 @@
+# Check everything out with LF, on every platform.
+#
+# Without this, git hands Windows a CRLF working tree. A test that reads a
+# repo file and matches against '\n' then finds nothing there and nowhere
+# else — which is exactly what happened to test/readme-is-executable.ts, and
+# it only surfaced because that test asserts it found something.
+#
+# Node tooling reads LF fine on Windows, so there is nothing to trade away.
+* text=auto eol=lf
+
+# Never touched by line-ending conversion.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.tgz binary

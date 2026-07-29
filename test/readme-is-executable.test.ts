@@ -21,10 +21,14 @@ import type { FastifyInstance } from 'fastify'
  * a body shape that changes breaks the build instead of the reader.
  */
 
+// Normalised, because git checks the file out with CRLF on Windows and every
+// pattern below is written against '\n'. Without this the extractor matched
+// nothing there and every case passed vacuously — which is what the count
+// assertion at the bottom exists to catch, and did.
 const README = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'README.md'),
   'utf8',
-)
+).replace(/\r\n/g, '\n')
 
 interface DocumentedCall {
   path: string
