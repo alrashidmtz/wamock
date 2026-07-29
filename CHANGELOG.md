@@ -4,6 +4,41 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.5] — 2026-07-29
+
+From a first external evaluation. Nothing here was found by the test suite —
+all of it came from someone using the tool for the first time.
+
+### Fixed
+
+- **Control API bodies were rejected without saying what was wrong.** Three
+  schemas were permissive while the rest were strict, so an extra key was
+  ignored and only the missing one reported: `{messageId, status}` answered
+  `id: Required` and left you to work out that `messageId` should be `id`. All
+  bodies are strict now and name both, and root-level issues no longer render
+  with an empty field prefix.
+
+### Documented
+
+- **Interception does not reach a client that captured `fetch` at
+  construction.** `constructor(transport = globalThis.fetch)` is a common DI
+  default; built before the mock, it keeps the original and requests go to the
+  real `graph.facebook.com`. With a valid token in the environment that means a
+  test sending real messages to real numbers. Written up as the security
+  warning it is, with the assertion that catches it, and pinned by a test —
+  there is no fix from inside wamock, so the limitation itself is the contract.
+- **Delivery statuses need `time.advance()`.** They are due shortly after the
+  send and the clock is frozen, so asserting immediately finds nothing and
+  looks like a broken mock.
+- **Your app's clock is not wamock's clock.** `advance()` cannot move the
+  `Date.now()` inside the code under test, so expiry tests have to age both
+  sides or they prove nothing.
+- **Request bodies for every control endpoint**, in the table rather than in
+  `src/control/routes.ts`.
+- **Pin `@latest` when installing.** pnpm's `minimumReleaseAge` holds back
+  recent publishes as a supply-chain measure, and a warm cache does the same;
+  landing on 0.1.0 and finding no `interceptGraph` is a bad first ten minutes.
+
 ## [0.2.4] — 2026-07-29
 
 ### Fixed

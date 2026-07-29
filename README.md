@@ -10,8 +10,13 @@ statuses) in a test, with no Meta account, no approved templates, and no network
 MIT licensed. Node 22+. Two runtime dependencies.
 
 ```bash
-npx wamock start --app-secret shhh --webhook-url http://localhost:3000/webhook
+npx wamock@latest start --app-secret shhh --webhook-url http://localhost:3000/webhook
 ```
+
+<sub>Pin `@latest` deliberately. Some setups resolve an older version on their
+own — pnpm's `minimumReleaseAge` holds back recently published packages as a
+supply-chain measure, and a warm cache can do the same. Installing 0.1.0 and
+wondering why `interceptGraph` is missing is a bad first ten minutes.</sub>
 
 ```bash
 curl -X POST localhost:4004/__mock/inbound \
@@ -131,6 +136,41 @@ await mock.reset()
 Time is virtual and frozen by default, so tests are deterministic — the same
 script produces the same message ids on every run.
 
+### Delivery statuses need the clock to move
+
+`sent` and `delivered` are scheduled a moment after the send, and the clock is
+frozen. Asserting right after `send()` finds nothing and looks like a broken
+mock:
+
+```ts
+await mock.send({ to: CUSTOMER, text: 'hola' })
+// no statuses yet — they are due at +50ms and +500ms of virtual time
+
+await mock.time.advance(60_000)   // now `sent` and `delivered` have arrived
+```
+
+This is deliberate: real statuses do not arrive synchronously either, and a
+mock that delivered them instantly would hide every ordering bug.
+
+### Your app's clock is not wamock's clock
+
+`time.advance()` moves **wamock's** clock. It cannot move the `Date.now()`
+inside the code under test — nothing can reach into another module's notion of
+time.
+
+That matters whenever your app decides something from the current time. wamock
+will refuse a free-form send with `131047` after 24 virtual hours, but if your
+app also tracks the window itself, it still believes the conversation is open.
+Age both sides:
+
+```ts
+await mock.time.advance(25 * 60 * 60 * 1000)
+vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60 * 1000))  // or your app's own clock
+```
+
+The durable fix is on your side: inject a clock rather than calling `Date.now()`
+directly. wamock does exactly that internally, for the same reason.
+
 `mock.baseUrl` also serves real HTTP, so an app that only knows how to talk to a
 URL can be pointed at it in the same test.
 
@@ -200,6 +240,30 @@ This patches the global `fetch`. It covers code that uses `fetch`; it does
 **not** cover `axios`, `node-fetch` or raw `http.request` — those need their own
 base URL or an HTTP proxy.
 
+> **Build your client AFTER the mock, and assert the traffic arrived.**
+>
+> Patching a global only reaches code that reads it **on every call**. A client
+> that captures it once — `constructor(private transport = globalThis.fetch)`,
+> a very common dependency-injection default in TypeScript — keeps the original
+> `fetch` if it was constructed first. The interception then does nothing, and
+> nothing tells you: your requests go to the real `graph.facebook.com`. With a
+> valid token in the environment, **a test sends real WhatsApp messages to real
+> numbers.**
+>
+> ```ts
+> const mock = await createWamock({ appSecret: 's', interceptGraph: true })
+> const client = new MyWhatsAppClient()   // built after — captures the patched fetch
+>
+> await client.send(...)
+>
+> // Assert the traffic actually landed here. If it escaped, this is empty —
+> // and that is the only signal you get.
+> expect(mock.messages()).toHaveLength(1)
+> ```
+>
+> If you cannot control construction order, pass the mock's `fetch` in
+> explicitly, or point the client at `mock.baseUrl` instead of intercepting.
+
 ---
 
 ## Fidelity
@@ -245,14 +309,24 @@ across v17 through v23.
 
 ### Control API — what Meta doesn't give you
 
-| Endpoint | What it does |
-|---|---|
-| `POST /__mock/inbound` | a customer writes; opens/renews the 24h window |
-| `POST /__mock/statuses` | force a message to `read` / `failed` |
-| `POST /__mock/time/advance` | move the virtual clock; fires everything due |
-| `POST /__mock/templates/{name}/{language}/transition` | play Meta's reviewer |
-| `POST /__mock/scenario` | latency, failure rates, duplication, ordering |
-| `POST /__mock/reset` · `GET /__mock/state` · `GET /__mock/messages` | inspect and reset |
+| Endpoint | Request body | What it does |
+|---|---|---|
+| `POST /__mock/inbound` | `{from, text}` · or `{from, button_reply:{id,title}}` · or `{from, list_reply:{id,title,description?}}` — plus optional `name`, `phone_number_id` | a customer writes; opens/renews the 24h window |
+| `POST /__mock/statuses` | `{id, status}` where `status` is `sent\|delivered\|read\|failed`; optional `error` (a numeric code) | force a message to a status Meta would not produce on its own |
+| `POST /__mock/time/advance` | `{ms}` | move the virtual clock; fires everything due |
+| `POST /__mock/templates/{name}/{language}/transition` | `{to}` — `APPROVED\|REJECTED\|PAUSED\|PENDING\|DISABLED`; optional `?waba_id=` | play Meta's reviewer |
+| `POST /__mock/scenario` | `{seed?, latencyMs?, sendFailureRate?, webhookFailureRate?, duplicateWebhooks?, outOfOrderStatuses?, nextError?:{code,times?}}` | latency, failure rates, duplication, ordering |
+| `POST /__mock/embedded-signup` | `{subscribed?}` | mint a signup code, optionally with the WABA unsubscribed |
+| `POST /__mock/tokens` | `{kind?, scopes?}` — `permanent\|short\|long` | mint a token to exercise expiry and missing scopes |
+| `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN`; optional `phone_number_id` | change a number's quality and announce it |
+| `POST /__mock/tier` | `{tier}` — `TIER_250\|TIER_1K\|…`; optional `phone_number_id` | set the messaging limit tier |
+| `POST /__mock/reset` | `{}` | back to the seed state |
+| `GET /__mock/state` · `GET /__mock/messages` | — | inspect |
+
+Every body is validated strictly: an unexpected key is rejected and named, so a
+typo does not look like it worked. `{messageId, status}` on `/__mock/statuses`
+answers `id: Required; Unrecognized key(s) in object: 'messageId'` rather than
+leaving you to guess.
 
 ### Tech Provider mode
 

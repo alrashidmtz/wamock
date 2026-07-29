@@ -23,6 +23,20 @@
  * **not** cover `axios`, `node-fetch`, or raw `http.request`. Those need their
  * own base URL or an HTTP proxy. Saying so here is better than letting someone
  * discover it from a test that mysteriously talks to the real Meta.
+ *
+ * ## The sharp edge: construction order
+ *
+ * Patching a global only reaches code that reads it **on every call**. A client
+ * that captures it once — `constructor(private transport = globalThis.fetch)`,
+ * a very common dependency-injection default — keeps the original if it was
+ * built before this ran. Interception then does nothing, and says nothing:
+ * requests go to the real `graph.facebook.com`, and with a valid token in the
+ * environment that means real messages to real numbers.
+ *
+ * There is no fix from in here; wamock cannot see a `fetch` reference someone
+ * else already holds. Build the client after the mock, and assert the traffic
+ * arrived (`expect(mock.messages()).toHaveLength(n)`) — an empty inbox is the
+ * only signal that it escaped.
  */
 
 /** Hosts that belong to Meta's Graph API and should be redirected. */

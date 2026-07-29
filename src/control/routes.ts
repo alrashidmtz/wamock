@@ -31,9 +31,11 @@ const InboundSchema = z
   // unexpected keys from ever reaching the payload builder.
   .strict()
 
-const AdvanceSchema = z.object({ ms: z.number().int() })
+// `.strict()` like the rest: a rejected call must name the key you got
+// wrong, not silently ignore it and complain only about what is missing.
+const AdvanceSchema = z.object({ ms: z.number().int() }).strict()
 
-const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) })
+const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) }).strict()
 
 const SignupSchema = z.object({ subscribed: z.boolean().optional() }).strict()
 
@@ -65,11 +67,13 @@ const TierSchema = z
   .object({ phone_number_id: z.string().optional(), tier: z.enum(MESSAGING_TIERS) })
   .strict()
 
-const StatusSchema = z.object({
-  id: z.string(),
-  status: z.enum(['sent', 'delivered', 'read', 'failed']),
-  error: z.number().int().optional(),
-})
+const StatusSchema = z
+  .object({
+    id: z.string(),
+    status: z.enum(['sent', 'delivered', 'read', 'failed']),
+    error: z.number().int().optional(),
+  })
+  .strict()
 
 /**
  * `.strict()` on purpose: silently ignoring a mistyped knob is worse than
@@ -118,12 +122,23 @@ function toInboundContent(input: z.infer<typeof InboundSchema>): InboundContent 
   })
 }
 
+/**
+ * Render a validation failure so it names what to fix. Root-level issues (an
+ * unrecognized key) carry no path, so prefixing them with ": " reads as a
+ * missing field name — the caller has enough to work out already.
+ */
+function describeIssues(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => (issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
+    .join('; ')
+}
+
 export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine): void {
   app.post('/__mock/inbound', async (request, reply) => {
     const parsed = InboundSchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        details: describeIssues(parsed.error),
       })
     }
 
@@ -181,7 +196,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = StatusSchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        details: describeIssues(parsed.error),
       })
     }
     return reply.send(engine.forceStatus(parsed.data.id, parsed.data.status, parsed.data.error))
@@ -192,7 +207,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = ScenarioSchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; '),
+        details: describeIssues(parsed.error),
       })
     }
     // Drop keys the caller omitted: under exactOptionalPropertyTypes an

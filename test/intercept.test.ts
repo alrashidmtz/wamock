@@ -147,6 +147,31 @@ describe('installGraphInterceptor', () => {
     expect(globalThis.fetch).toBe(before)
   })
 
+  it('does NOT reach a client that captured fetch before installation', async () => {
+    // The sharp edge, pinned so it cannot be forgotten. Patching a global only
+    // reaches code that reads it per call; `constructor(transport =
+    // globalThis.fetch)` is a common DI default and captures it once. With the
+    // client built first, interception silently does nothing — and against a
+    // real token that means a test sends real WhatsApp messages.
+    //
+    // This asserts the limitation rather than a fix: there is no fix from
+    // inside wamock. Construction order is the fix, and the README says so.
+    const original = globalThis.fetch
+    class CapturingClient {
+      constructor(private readonly transport = globalThis.fetch) {}
+      call() {
+        return this.transport
+      }
+    }
+
+    const builtBefore = new CapturingClient()
+    restore = installGraphInterceptor({ baseUrl: 'http://127.0.0.1:4004' })
+    const builtAfter = new CapturingClient()
+
+    expect(builtBefore.call()).toBe(original)
+    expect(builtAfter.call()).not.toBe(original)
+  })
+
   it('rejects a baseUrl that is not a URL, instead of silently doing nothing', () => {
     // A typo'd base would otherwise leave every Graph call going to Meta for
     // real, which is the worst possible failure for a testing tool.
