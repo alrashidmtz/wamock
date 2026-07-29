@@ -18,7 +18,12 @@ All notable changes to this project are documented here. Format follows
   OIDC had already succeeded — so it now points at npm's actual error instead
   of guessing.
 
-## [0.2.7] — 2026-07-29 — **not published** (provenance rejected the manifest)
+## [0.2.7] — 2026-07-29 — **npm publish rejected; container image exists**
+
+The npm publish failed on the provenance check below, but the container job had
+already succeeded, so `ghcr.io/alrashidmtz/wamock:0.2.7` exists while
+`wamock@0.2.7` does not. Use 0.2.8. The workflow now gates the image on npm for
+tagged releases so the two registries cannot disagree about a version again.
 
 ### Changed
 

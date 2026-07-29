@@ -119,7 +119,16 @@ jobs:
           fi
 
   container:
-    needs: verify
+    # On a version tag the image must not ship unless npm did: otherwise a
+    # partial release leaves the registries disagreeing about what a version
+    # is, which happened with 0.2.7 — the image published while npm rejected
+    # the manifest. A manual run skips the npm job entirely, and `skipped` is
+    # an acceptable result precisely so the container stays releasable alone.
+    needs: [verify, npm]
+    if: >-
+      always() &&
+      needs.verify.result == 'success' &&
+      (needs.npm.result == 'success' || needs.npm.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: read
