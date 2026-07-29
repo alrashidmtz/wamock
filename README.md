@@ -374,6 +374,18 @@ network, and never point it at production data.
 No GUI, no disk persistence, no multi-tenant auth, no real media storage, no
 WhatsApp Flows or calling. See `CHANGELOG.md` for what's planned.
 
+### It emulates Meta directly, not a BSP wrapper
+
+If your code talks to **Twilio, 360dialog, MessageBird or any other BSP**, this
+is not your mock. Those are different APIs, not a different flavour of the same
+one — different hosts, different auth, form-encoded bodies instead of JSON, and
+`X-Twilio-Signature` (HMAC-SHA1 over URL and params) instead of
+`X-Hub-Signature-256` (HMAC-SHA256 over the raw body).
+
+wamock speaks `graph.facebook.com` with a bearer token. That is deliberate:
+being tied to no vendor is the point. If you talk to Meta through a BSP, your
+BSP's sandbox is the right tool.
+
 ---
 
 ## Is a hosted version worth building?
