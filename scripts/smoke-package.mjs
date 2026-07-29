@@ -26,8 +26,35 @@ const workdir = mkdtempSync(join(tmpdir(), 'wamock-smoke-'))
 const run = (command, args, cwd) =>
   execFileSync(command, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: process.platform === 'win32' })
 
+/**
+ * Children to stop before this process does.
+ *
+ * `fail()` calls `process.exit()`, and that skips every pending `finally` —
+ * so the `finally { receiver.kill() }` below never ran on a failing run. Three
+ * express receivers were still alive an hour later, each holding a port. CI
+ * never noticed because the runner reaps everything when the job ends; the
+ * cost lands entirely on whoever runs this locally.
+ */
+const children = new Set()
+
+function stopChildren() {
+  for (const child of children) {
+    try {
+      child.kill()
+    } catch {
+      // Already gone. Nothing to do, and nothing worth reporting.
+    }
+  }
+  children.clear()
+}
+
+// Covers the paths `fail()` does not: an uncaught throw, or a Ctrl-C.
+process.on('exit', stopChildren)
+process.on('SIGINT', () => process.exit(130))
+
 function fail(message) {
   process.stderr.write(`\nPACKAGE SMOKE TEST FAILED: ${message}\n`)
+  stopChildren()
   rmSync(workdir, { recursive: true, force: true })
   process.exit(1)
 }
@@ -175,6 +202,7 @@ process.exit(0)
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
+  children.add(receiver)
   let receiverLog = ''
   receiver.stdout.on('data', (d) => (receiverLog += d))
   receiver.stderr.on('data', (d) => (receiverLog += d))
@@ -203,6 +231,7 @@ process.exit(0)
     process.stdout.write('shipped express example completes the round trip\n')
   } finally {
     receiver.kill()
+    children.delete(receiver)
     await mock.close()
   }
 } catch (error) {
