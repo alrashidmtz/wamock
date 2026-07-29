@@ -4,7 +4,7 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
-## [0.2.8] — 2026-07-29
+## [0.2.8] — 2026-07-28
 
 ### Fixed
 
@@ -18,7 +18,7 @@ All notable changes to this project are documented here. Format follows
   OIDC had already succeeded — so it now points at npm's actual error instead
   of guessing.
 
-## [0.2.7] — 2026-07-29 — **npm publish rejected; container image exists**
+## [0.2.7] — 2026-07-28 — **npm publish rejected; container image exists**
 
 The npm publish failed on the provenance check below, but the container job had
 already succeeded, so `ghcr.io/alrashidmtz/wamock:0.2.7` exists while
@@ -35,7 +35,7 @@ tagged releases so the two registries cannot disagree about a version again.
   says so instead of failing cryptically. The README documents the one-time
   setup.
 
-## [0.2.6] — 2026-07-29
+## [0.2.6] — 2026-07-28
 
 ### Added
 
@@ -47,7 +47,12 @@ tagged releases so the two registries cannot disagree about a version again.
   documented the hazard. The warning names the benign case too, so a test that
   simply makes no Graph calls is not left guessing.
 
-## [0.2.5] — 2026-07-29
+## [0.2.5] — 2026-07-28 — **npm publish failed; container image exists**
+
+Like 0.2.7 below, the npm job failed while the container job succeeded, so
+`ghcr.io/alrashidmtz/wamock:0.2.5` exists and `wamock@0.2.5` does not. The
+changes described here reached npm in 0.2.6.
+
 
 From a first external evaluation. Nothing here was found by the test suite —
 all of it came from someone using the tool for the first time.
@@ -82,7 +87,7 @@ all of it came from someone using the tool for the first time.
   recent publishes as a supply-chain measure, and a warm cache does the same;
   landing on 0.1.0 and finding no `interceptGraph` is a bad first ten minutes.
 
-## [0.2.4] — 2026-07-29
+## [0.2.4] — 2026-07-28
 
 ### Fixed
 
@@ -97,7 +102,7 @@ all of it came from someone using the tool for the first time.
   `npm run test:package` runs the example against the packaged build on every
   push, so documentation that ships is documentation that runs.
 
-## [0.2.3] — 2026-07-29
+## [0.2.3] — 2026-07-28
 
 ### Fixed
 
@@ -111,7 +116,7 @@ all of it came from someone using the tool for the first time.
   unhandled `EPIPE` looks like a crash in wamock rather than the reader simply
   going away.
 
-## [0.2.2] — 2026-07-29
+## [0.2.2] — 2026-07-28
 
 ### Fixed
 
@@ -127,7 +132,7 @@ all of it came from someone using the tool for the first time.
   published at all. Releases through CI were never affected — that path always
   built first — which is one more argument for publishing from CI.
 
-## [0.2.1] — 2026-07-29 — **broken, use 0.2.2**
+## [0.2.1] — 2026-07-28 — **broken, use 0.2.2**
 
 ### Fixed
 
