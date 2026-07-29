@@ -14,7 +14,7 @@
  * Written in Node rather than shell because CI runs it on Windows too.
  */
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -103,8 +103,11 @@ process.exit(0)
   // other. Documentation that ships is documentation that must run.
   process.stdout.write('running the shipped vitest example against the package...\n')
   run('npm', ['install', 'vitest', '--no-audit', '--no-fund'], workdir)
+  // Copy in-process. Shelling out to `node -e` meant the path travelled
+  // through cmd.exe on Windows, which mangled the quoting — caught by the
+  // Windows leg of the CI matrix, which is what it is there for.
   const example = join(repoRoot, 'examples', 'vitest', 'whatsapp-flow.test.ts')
-  run('node', ['-e', `require('fs').copyFileSync(${JSON.stringify(example)}, 'whatsapp-flow.test.ts')`], workdir)
+  copyFileSync(example, join(workdir, 'whatsapp-flow.test.ts'))
   const result = run('npx', ['vitest', 'run', 'whatsapp-flow.test.ts'], workdir)
   if (!/\d+ passed/.test(result) || /failed/.test(result)) {
     fail(`the shipped vitest example does not pass:\n${result}`)
