@@ -201,10 +201,26 @@ not an auth server and cannot tell a real credential from a random string);
 tokens it did issue are still fully validated, which is what keeps the
 token-expiry scenario meaningful.
 
-### Still not verified
+### Verified against a real integration
 
-- Running a **third-party integration's own test suite** end to end against
-  wamock. The dogfood here uses a client reconstructed to the contract those
-  integrations were observed to follow, exercised only through wamock's public
-  HTTP surface. That is weaker evidence than running someone else's suite, and
-  stronger than assertions written against the mock's internals.
+A production WhatsApp Cloud API integration now runs its **own adapter**,
+unmodified, against wamock — 20 tests covering the paths it uses in
+production, plus the tech-provider connect flow. The adapter still builds
+`https://graph.facebook.com/v19.0/...` as it always did; `installGraphInterceptor`
+moves the destination underneath it.
+
+Everything held on the first run: 131047 from the mock enforcing the window,
+132001 for a template approved in a different language, 132015 once paused,
+message splitting, interactive limits, statuses-only webhook parsing, and the
+connect flow (`debug_token` telling a permanent System User token from a short
+Graph Explorer one, `subscribed_apps`, `display_phone_number`, and the
+"already exists" branch). No fidelity gaps surfaced.
+
+The tests were confirmed to depend on the mock rather than pass vacuously —
+disabling the interceptor fails 16 of the 20.
+
+This closes the acceptance criterion that had been open since v1: a real
+integration can be pointed at wamock without changing its code. The one
+caveat worth repeating is the reason the interceptor exists — that
+integration hardcodes the Graph host, and so does every other one we
+checked, so "just change the base URL" was never the mechanism.
