@@ -43,6 +43,15 @@ export interface CreateWamockOptions {
    * you want when the code under test is not configurable.
    */
   interceptGraph?: boolean
+  /**
+   * How long any helper waits for in-flight deliveries before giving up.
+   * Defaults to 5s.
+   *
+   * Every helper — `inbound`, `send`, `time.advance`, `close` — waits for the
+   * webhooks it triggered, and that wait is on YOUR receiver. A receiver that
+   * never resolves would otherwise freeze the first call, not just teardown.
+   */
+  settleTimeoutMs?: number
   phoneNumberId?: string
   wabaId?: string
   displayPhoneNumber?: string
@@ -140,14 +149,19 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 
   let closed = false
 
+  const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
+
   /**
    * Advance by zero and settle. Every helper does this so callers never have
    * to think about the gap between "the timer fired" and "the webhook was
    * handed over" — the classic source of a passing-then-failing assertion.
+   *
+   * Bounded, because settling waits on the caller's own receiver. A hang there
+   * leaves nothing to read; a late delivery is at least diagnosable.
    */
   const flush = async (): Promise<void> => {
     engine.clock.advance(0)
-    await engine.settle()
+    await settleWithin(engine, settleTimeoutMs)
   }
 
   return {
@@ -181,7 +195,7 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
     time: {
       async advance(ms) {
         engine.clock.advance(ms)
-        await engine.settle()
+        await settleWithin(engine, settleTimeoutMs)
       },
       now: () => engine.clock.now(),
     },
@@ -226,7 +240,9 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 
     async reset() {
       engine.reset()
-      await engine.settle()
+      // Bounded like every other wait: reset() between tests must not be the
+      // place a stuck receiver freezes the run.
+      await settleWithin(engine, settleTimeoutMs)
     },
 
     async close() {
@@ -238,8 +254,13 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       // the wait and outlive the close. Without this, `afterEach(close)` does
       // not isolate: one test's webhooks land inside the next one, and the
       // flakiness looks like it belongs to the code under test.
+      //
+      // Bounded, because that wait is on USER code. An onWebhook that never
+      // resolves — a lock, a pending request, a forgotten await — would
+      // otherwise hang close() forever, and a hang leaves nothing to read. A
+      // late delivery is recoverable; a wedged test run is not.
       engine.deliverer.clear()
-      await engine.settle()
+      await settleWithin(engine, settleTimeoutMs)
 
       restoreInterceptor?.()
       engine.clock.stop()
@@ -266,6 +287,32 @@ function buildTransport(options: CreateWamockOptions) {
     })
     if (!response.ok) throw new Error(`webhook receiver returned HTTP ${response.status}`)
   })
+}
+
+/**
+ * Long enough that any reasonable receiver finishes, short enough that a stuck
+ * one does not look like a frozen test suite.
+ */
+const DEFAULT_SETTLE_TIMEOUT_MS = 5_000
+
+/**
+ * Await in-flight deliveries, but never longer than `timeoutMs`.
+ *
+ * The timer is unref'd so this can never be the reason a process stays alive —
+ * a teardown helper that holds the event loop open would be its own bug.
+ */
+async function settleWithin(engine: WamockEngine, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expiry = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs)
+    timer.unref?.()
+  })
+
+  try {
+    await Promise.race([engine.settle(), expiry])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 function addressOf(app: FastifyInstance): string {

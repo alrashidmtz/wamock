@@ -71,6 +71,45 @@ describe('close() stops everything it started', () => {
     expect(delivered).toBe(1) // the inbound only
   })
 
+  it('returns even when a receiver never resolves', async () => {
+    // Awaiting in-flight deliveries means awaiting USER code, which wamock
+    // does not control. An onWebhook that hangs — a lock, a pending fetch, a
+    // forgotten await — would otherwise hang close() forever, and a hang leaves
+    // nothing to read. Bounded: a late delivery beats a wedged test run.
+    const m = await createWamock({
+      appSecret: 's',
+      start: EPOCH,
+      settleTimeoutMs: 100,
+      onWebhook: () => new Promise(() => {}),
+    })
+
+    await m.inbound({ from: '5215555000001', text: 'hola' })
+
+    const started = Date.now()
+    await m.close()
+
+    expect(Date.now() - started).toBeLessThan(3_000)
+  })
+
+  it('still waits for a receiver that finishes promptly', async () => {
+    // The bound must not turn into "give up immediately" — the whole point of
+    // the wait is that ordinary receivers get to finish.
+    let finished = false
+    const m = await createWamock({
+      appSecret: 's',
+      start: EPOCH,
+      onWebhook: async () => {
+        await new Promise((r) => setTimeout(r, 30))
+        finished = true
+      },
+    })
+
+    await m.inbound({ from: '5215555000001', text: 'hola' })
+    await m.close()
+
+    expect(finished).toBe(true)
+  })
+
   it('is safe to call twice', async () => {
     const m = await createWamock({ appSecret: 's', start: EPOCH })
     await m.close()

@@ -4,6 +4,21 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.1] — 2026-07-29
+
+### Fixed
+
+- **Every library helper could hang forever on a stuck receiver.** `inbound`,
+  `send`, `time.advance`, `reset` and `close` all wait for the webhooks they
+  triggered, and that wait is on *your* `onWebhook`. A receiver that never
+  resolves — a lock, a pending request, a forgotten `await` — froze the very
+  first call with no output at all. Introduced in 0.2.0 by the `close()` fix,
+  which traded delivered-after-close for a hang; a hang is worse, because it
+  leaves nothing to read.
+
+  Every wait is now bounded, configurable via `settleTimeoutMs` (default 5s).
+  A late delivery is diagnosable; a wedged suite is not.
+
 ## [0.2.0] — 2026-07-28
 
 A quality pass driven by lenses the first reviews had not used: resource
