@@ -44,6 +44,12 @@ export interface InterceptorOptions {
   fetchImpl?: FetchImpl
   /** Extra hostnames to redirect, if you proxy Graph through your own domain. */
   additionalHosts?: string[]
+  /**
+   * Called once per redirected request. Lets a caller notice that the
+   * interceptor was installed but never used — the signature of a client that
+   * captured `fetch` before the patch and is still talking to the real Meta.
+   */
+  onIntercept?: () => void
 }
 
 /**
@@ -76,6 +82,7 @@ export function installGraphInterceptor(options: InterceptorOptions): () => void
     if (input instanceof Request) {
       const url = new URL(input.url)
       if (!hosts.has(url.hostname)) return original(input, init)
+      options.onIntercept?.()
       return original(new Request(redirect(url), input), init)
     }
 
@@ -89,6 +96,7 @@ export function installGraphInterceptor(options: InterceptorOptions): () => void
     }
 
     if (!hosts.has(url.hostname)) return original(input, init)
+    options.onIntercept?.()
     return original(redirect(url).toString(), init)
   }
 

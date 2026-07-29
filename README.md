@@ -243,12 +243,23 @@ const mock = await createWamock({ appSecret: 's', interceptGraph: true })
 const client = new GraphClient()                                  // ✓ holds the patched one
 ```
 
-Get the order wrong and the interception silently does nothing: the client still
-talks to `graph.facebook.com`. **If a valid access token is present in the
-environment, that means the test sends real WhatsApp messages to real numbers** —
-so treat this as a correctness *and* a safety issue, not a nuisance. A quick way
-to catch it: assert that the mock saw the traffic (`mock.expectSent(...)` or
-`mock.messages()`), which fails loudly when nothing was intercepted.
+Get the order wrong and the interception does nothing: the client still talks to
+`graph.facebook.com`. **If a valid access token is present in the environment,
+that means the test sends real WhatsApp messages to real numbers** — so treat
+this as a correctness *and* a safety issue, not a nuisance.
+
+Because that failure is otherwise invisible, `close()` warns when
+`interceptGraph` was enabled and nothing was ever intercepted:
+
+```
+wamock: interceptGraph was enabled but no Graph request was intercepted.
+If your client captured globalThis.fetch before createWamock() ran, it still
+holds the real one and its requests went to Meta. …
+```
+
+Nothing can un-capture that reference, so the warning is the earliest point at
+which it can be caught. For a hard failure rather than a warning, assert that
+the mock saw the traffic — `mock.expectSent(...)` throws when it did not.
 
 #### Your app's clock is not wamock's clock
 

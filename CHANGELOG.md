@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`close()` warns when `interceptGraph` was on and nothing was intercepted.**
+  A client that captures `globalThis.fetch` in its constructor — the shape
+  `constructor(transport = globalThis.fetch)`, common because it keeps the
+  transport injectable — keeps the real `fetch` if it was built before the mock.
+  Interception then does nothing at all, in silence, and with a valid token in
+  the environment those requests reach Meta and send real messages. Nothing can
+  un-capture that reference, so the warning is the earliest point at which the
+  mistake can be caught. `installGraphInterceptor` takes an `onIntercept`
+  callback to support it.
+
 ## [0.2.4] — 2026-07-29
 
 ### Fixed

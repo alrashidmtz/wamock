@@ -143,8 +143,14 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
   // Tying the interceptor to the mock's lifetime removes the footgun of a
   // forgotten restore(), which leaves the global fetch patched for every test
   // that follows.
+  let intercepted = 0
   const restoreInterceptor = options.interceptGraph
-    ? installGraphInterceptor({ baseUrl })
+    ? installGraphInterceptor({
+        baseUrl,
+        onIntercept: () => {
+          intercepted += 1
+        },
+      })
     : undefined
 
   let closed = false
@@ -275,6 +281,26 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       await settleWithin(engine, settleTimeoutMs)
 
       restoreInterceptor?.()
+
+      // Interception that never fired almost always means the client under test
+      // is holding a `fetch` it captured BEFORE the patch — the shape
+      // `constructor(transport = globalThis.fetch)` produces, which is common
+      // precisely because it keeps the transport injectable. Nothing here can
+      // un-capture that reference, so the requests went to the real Meta: with a
+      // valid token in the environment, that is real messages to real numbers.
+      //
+      // Silence is the dangerous outcome, so say it out loud. Only when
+      // interception was explicitly asked for, which makes zero traffic
+      // surprising rather than normal.
+      if (options.interceptGraph === true && intercepted === 0) {
+        console.warn(
+          'wamock: interceptGraph was enabled but no Graph request was intercepted. ' +
+            'If your client captured globalThis.fetch before createWamock() ran, it still ' +
+            'holds the real one and its requests went to Meta. Construct the client after ' +
+            'createWamock(), or point it at mock.baseUrl.',
+        )
+      }
+
       engine.clock.stop()
       await app.close()
     },
