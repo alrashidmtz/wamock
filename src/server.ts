@@ -1,5 +1,5 @@
 import Fastify from 'fastify'
-import type { FastifyInstance } from 'fastify'
+import type { FastifyBodyParser, FastifyInstance } from 'fastify'
 
 import { registerControlRoutes } from './control/routes.js'
 import type { WamockEngine } from './core/engine.js'
@@ -64,6 +64,50 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       }).toBody(engine.nextFbtraceId()),
     ),
   )
+
+  // `curl -d '{"ms":1000}' .../__mock/time/advance` labels the body
+  // `application/x-www-form-urlencoded`, because that is curl's default for
+  // `-d`. Fastify ships a JSON parser only, so every control-API call anyone
+  // types in a terminal died in the error handler as "(#100) Invalid
+  // parameter" — an error that blamed the parameters for a body it never read.
+  //
+  // The control API is wamock's own affordance, not a surface that has to match
+  // Meta, so it takes the ergonomic reading: a body that parses as JSON is
+  // JSON. The Graph routes below stay strict, where the fidelity actually
+  // matters, which is why this checks the path rather than parsing everything.
+  const parseControlBody: FastifyBodyParser<string> = (request, body, done) => {
+    if (!request.url.startsWith('/__mock/')) {
+      done(
+        new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: `Unsupported content type '${request.headers['content-type'] ?? ''}'. Send application/json.`,
+        }),
+        undefined,
+      )
+      return
+    }
+    const raw = body
+    if (raw.trim() === '') {
+      done(null, {})
+      return
+    }
+    try {
+      done(null, JSON.parse(raw))
+    } catch {
+      done(
+        new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: 'Body is not valid JSON. The control API reads every body as JSON.',
+        }),
+        undefined,
+      )
+    }
+  }
+
+  // The catch-all covers what curl's `-d` sends. `text/plain` needs naming
+  // separately because Fastify parses it itself, handing the route a string
+  // that then failed validation as "Expected object, received string" — a
+  // message that describes the symptom and hides the cause.
+  app.addContentTypeParser('*', { parseAs: 'string' }, parseControlBody)
+  app.addContentTypeParser('text/plain', { parseAs: 'string' }, parseControlBody)
 
   registerControlRoutes(app, engine)
 

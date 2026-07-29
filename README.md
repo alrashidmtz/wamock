@@ -29,7 +29,6 @@ wondering where `interceptGraph` went is a bad first ten minutes.</sub>
 
 ```bash
 curl -X POST localhost:4004/__mock/inbound \
-  -H 'content-type: application/json' \
   -d '{"from":"5215555000001","text":"hola"}'
 ```
 
@@ -318,6 +317,11 @@ Any `vNN.N` version segment is accepted — real integrations are scattered
 across v17 through v23.
 
 ### Control API — what Meta doesn't give you
+
+Every body here is read as JSON whatever the `content-type` says, so a plain
+`curl -d '{...}'` works — curl labels that `x-www-form-urlencoded`, and requiring
+the header turned every copy-pasted example into `(#100) Invalid parameter`. The
+Graph routes stay strict, where matching Meta is the point.
 
 | Endpoint | Request body | What it does |
 |---|---|---|

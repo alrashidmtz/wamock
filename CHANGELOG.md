@@ -4,6 +4,27 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.11] — 2026-07-28
+
+**Fixed: every control-API example in the README failed when copy-pasted.**
+
+`curl -d '{...}'` labels the body `application/x-www-form-urlencoded`, which is
+curl's default for `-d`. Fastify ships a JSON parser only, so the request died
+in the error handler as `(#100) Invalid parameter` — an error that blamed the
+parameters for a body that was never read. Four of the README's own commands
+did this, and so did anything anyone typed in a terminal.
+
+The control API now reads any body as JSON, whatever the `content-type` claims,
+and a body that genuinely is not JSON now says so instead of blaming the
+parameters. `text/plain` needed naming separately: Fastify parses it itself and
+handed the route a string, which surfaced as "Expected object, received string".
+The Graph routes stay strict, where matching Meta is the point.
+
+Found by executing the README rather than reading it, after the same class of
+defect turned up in the pnpm advice in 0.2.10. Every other executable claim was
+then run too: the TypeScript examples, the `wamock/intercept` subpath, and all
+fourteen documented control-API request bodies.
+
 ## [0.2.10] — 2026-07-28
 
 Documentation only.
