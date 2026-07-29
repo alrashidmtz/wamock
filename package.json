@@ -1,6 +1,6 @@
 {
   "name": "wamock",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "A faithful, standalone mock of the WhatsApp Cloud API. Test your integration end-to-end without a WABA.",
   "keywords": [
     "whatsapp",

@@ -4,6 +4,33 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.12] — 2026-07-29
+
+**No behaviour change. `dist/` is byte-identical to 0.2.11** — verified by
+diffing a fresh pack against the published tarball. What changed is the suite
+that guards it, and this release exists so that record ships with the package.
+
+Mutation score 78.19 → 80.40 (`server.ts` 66.67 → 83.33, `control/routes.ts`
+65.22 → 78.26); 498 → 526 tests. The surviving mutants all pointed at one gap:
+rejection paths were never exercised. `if (!parsed.success)` survived in six
+control routes, and so did `!clientId || !clientSecret || !code`,
+`!inputToken || !accessToken`, `!name`, the version pattern, and every
+optional-field spread. The suite only ever made correct calls, so nothing
+pinned down what happens when a caller does not — which is the case a caller
+actually meets.
+
+Three of those mutants survived because assertions matched a symptom two
+different causes produce. Checking a 400 does not distinguish "the route
+refused this" from "it failed deeper for its own reasons", and in two cases
+the deeper failure leaked something it should not: an internal class name, and
+the literal string `undefined`, both inside a Meta-shaped error. Those
+assertions now pin the message and forbid the leak.
+
+The README's control-API examples and the Express example are now executed by
+the suite, so neither can rot the way the pnpm advice in 0.2.10 and the curl
+examples in 0.2.11 did. The mutation threshold rises 76 → 78 to hold the gain,
+and that job now runs green in CI at 79.65 in 14m41s — its first run ever.
+
 ## [0.2.11] — 2026-07-28
 
 **Fixed: every control-API example in the README failed when copy-pasted.**
