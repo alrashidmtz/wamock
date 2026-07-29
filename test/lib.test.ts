@@ -178,3 +178,99 @@ describe('inbound helpers', () => {
     })
   })
 })
+
+describe('unused interception warning', () => {
+  /**
+   * The failure this catches, from a real integration: a Graph client that
+   * captures `globalThis.fetch` in its constructor keeps the REAL fetch if it
+   * was built before the mock. `interceptGraph` then does nothing at all, in
+   * silence — and with a valid token in the environment those requests reach
+   * Meta and send actual messages.
+   *
+   * Nothing can un-capture that reference, so the next best thing is to stop
+   * being silent about it.
+   */
+  const captureWarnings = (): { lines: string[]; restore: () => void } => {
+    const lines: string[] = []
+    const original = console.warn
+    console.warn = (...args: unknown[]) => {
+      lines.push(args.map(String).join(' '))
+    }
+    return { lines, restore: () => (console.warn = original) }
+  }
+
+  it('warns when interceptGraph was on and nothing was ever intercepted', async () => {
+    const warnings = captureWarnings()
+    try {
+      const m = await createWamock({ appSecret: 's', interceptGraph: true })
+      await m.close()
+      expect(warnings.lines.join('\n')).toMatch(/interceptGraph/)
+    } finally {
+      warnings.restore()
+    }
+  })
+
+  it('stays quiet when Graph traffic actually went through the interceptor', async () => {
+    const warnings = captureWarnings()
+    try {
+      const m = await createWamock({ appSecret: 's', interceptGraph: true })
+      // Exactly what a client with a hardcoded host does.
+      await fetch(`https://graph.facebook.com/v20.0/${m.phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer t' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          to: '5215555000001',
+          type: 'text',
+          text: { body: 'hola' },
+        }),
+      })
+      await m.close()
+      expect(warnings.lines.join('\n')).not.toMatch(/interceptGraph/)
+    } finally {
+      warnings.restore()
+    }
+  })
+
+  it('stays quiet when interceptGraph was never requested', async () => {
+    const warnings = captureWarnings()
+    try {
+      const m = await createWamock({ appSecret: 's' })
+      await m.close()
+      expect(warnings.lines.join('\n')).not.toMatch(/interceptGraph/)
+    } finally {
+      warnings.restore()
+    }
+  })
+  it('fires for the exact shape that causes it: a client built before the mock', async () => {
+    // The real-world reproduction, with the escape hatch that keeps it offline:
+    // the "real fetch" this client captures is a stub, so nothing leaves the
+    // machine. What matters is that it is NOT the patched global.
+    let wentToTheRealMeta = 0
+    const realFetchStub = async (): Promise<Response> => {
+      wentToTheRealMeta += 1
+      return new Response('{}', { status: 200 })
+    }
+
+    class GraphClient {
+      constructor(private readonly transport = realFetchStub) {}
+      send(): Promise<Response> {
+        return this.transport()
+      }
+    }
+
+    const warnings = captureWarnings()
+    try {
+      const client = new GraphClient() // built BEFORE the mock: holds the stub
+      const m = await createWamock({ appSecret: 's', interceptGraph: true })
+
+      await client.send()
+
+      expect(wentToTheRealMeta).toBe(1) // it bypassed the interceptor entirely
+      await m.close()
+      expect(warnings.lines.join('\n')).toMatch(/interceptGraph/)
+    } finally {
+      warnings.restore()
+    }
+  })
+})

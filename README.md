@@ -13,10 +13,12 @@ MIT licensed. Node 22+. Two runtime dependencies.
 npx wamock@latest start --app-secret shhh --webhook-url http://localhost:3000/webhook
 ```
 
-<sub>Pin `@latest` deliberately. Some setups resolve an older version on their
-own — pnpm's `minimumReleaseAge` holds back recently published packages as a
-supply-chain measure, and a warm cache can do the same. Installing 0.1.0 and
-wondering why `interceptGraph` is missing is a bad first ten minutes.</sub>
+<sub>Pin `@latest` deliberately — **pnpm users especially**: `pnpm add -D
+wamock@latest`. pnpm's `minimumReleaseAge` skips packages published very
+recently as a supply-chain measure, so a plain `pnpm add wamock` can resolve to
+an older release that predates the features documented here. A warm cache can
+do the same. Landing on 0.1.0 and wondering where `interceptGraph` went is a bad
+first ten minutes.</sub>
 
 ```bash
 curl -X POST localhost:4004/__mock/inbound \
@@ -138,9 +140,10 @@ script produces the same message ids on every run.
 
 ### Delivery statuses need the clock to move
 
-`sent` and `delivered` are scheduled a moment after the send, and the clock is
-frozen. Asserting right after `send()` finds nothing and looks like a broken
-mock:
+Meta sends `sent` and `delivered` as webhooks *after* the send, never as its
+response — and here they are due at a virtual instant that never arrives on its
+own, because the clock is frozen. Asserting right after `send()` finds nothing
+and reads like a broken mock rather than a stopped clock:
 
 ```ts
 await mock.send({ to: CUSTOMER, text: 'hola' })

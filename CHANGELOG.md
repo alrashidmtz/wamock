@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.2.6] — 2026-07-29
+
+### Added
+
+- **A warning when `interceptGraph` was enabled but nothing was ever
+  intercepted.** That is the signature of a client which captured
+  `globalThis.fetch` before the mock installed its patch — it still holds the
+  real one, and its requests reached Meta. Nothing can un-capture that
+  reference, but staying silent about it was the dangerous part, and 0.2.5 only
+  documented the hazard. The warning names the benign case too, so a test that
+  simply makes no Graph calls is not left guessing.
+
 ## [0.2.5] — 2026-07-29
 
 From a first external evaluation. Nothing here was found by the test suite —
