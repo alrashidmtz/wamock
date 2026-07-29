@@ -31,6 +31,11 @@ jobs:
       # typecheck + lint + tests with coverage thresholds enforced
       - run: npm run check
       - run: npm run build
+      # Everything above tests src/. This tests what actually ships: it packs
+      # the tarball, installs it, and drives it through its own public API.
+      # 0.2.1 shipped a dist/ compiled before its own fix with a fully green
+      # suite, because nothing was looking at the gap between the two.
+      - run: npm run test:package
 
   # Weekly rather than per-push: mutation testing takes minutes, and its value
   # is catching slow erosion of test quality, not gating a single commit.

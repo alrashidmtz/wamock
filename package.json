@@ -48,6 +48,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:mutation": "stryker run",
+    "test:package": "node scripts/smoke-package.mjs",
     "lint": "eslint src test",
     "check": "npm run typecheck && npm run lint && npm run test:coverage"
   },
