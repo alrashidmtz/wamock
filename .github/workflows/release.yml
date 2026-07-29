@@ -81,22 +81,22 @@ jobs:
             echo "already=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Fail here rather than letting npm surface ENEEDAUTH from deep in its
-      # log. A red run is correct when the release did not publish — but it has
-      # to say what to do about it, or people learn to scroll past the colour.
+      # Attempt the publish, and only annotate if it actually fails.
+      #
+      # Checking for NPM_TOKEN up front would have been wrong: Trusted
+      # Publishing authenticates over OIDC and needs no token at all, so a
+      # pre-flight check would block the very setup this repo is moving toward.
+      # Letting the command decide covers all three cases — token, OIDC, or
+      # neither — and a red run still says what to do instead of leaving
+      # ENEEDAUTH buried in npm's log.
       - if: steps.published.outputs.already == 'false'
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          if [ -z "$NPM_TOKEN" ]; then
-            echo "::error title=npm publish is not configured::NPM_TOKEN secret is missing. Either add it under Settings > Secrets and variables > Actions, or set up Trusted Publishing at https://www.npmjs.com/package/wamock/access which needs no token at all. Until then publish by hand: npm publish --access public --otp=<code>"
-            exit 1
-          fi
-
-      - if: steps.published.outputs.already == 'false'
-        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if ! npm publish --provenance --access public; then
+            echo "::error title=npm publish failed::Authenticate CI one of two ways. Preferred: Trusted Publishing at https://www.npmjs.com/package/wamock/access — link this repo and release.yml, no token to store or rotate. Alternative: add an NPM_TOKEN secret under Settings > Secrets and variables > Actions. To publish this version by hand right now: npm publish --access public --otp=<code>"
+            exit 1
+          fi
 
   container:
     needs: verify
