@@ -43,7 +43,7 @@ silent inbound at the one cause that had been ruled out. The payload is built in
 one place now, and a round-trip assertion guards the whole class rather than
 this one field.
 
-**Test quality.** Mutation kills 1846 → 1889, threshold 78 → 79, 526 → 557
+**Test quality.** Mutation kills 1846 → 1895, threshold 78 → 79, 526 → 561
 tests. Four of the tests these fixes leaned on asserted the wrong thing:
 `clock.stop()` was covered by "does not throw", which a `stop()` that clears
 nothing satisfies perfectly; `start()` being a no-op on a frozen clock — what
@@ -58,11 +58,17 @@ rather than relearned. **The headline score can fall while the suite strictly
 improves**: 82.07, then 81.09, then 80.88 across three runs of this branch,
 while kills rose 1846 → 1887 the whole way. A timeout counts as a kill, and
 those runs had 77, 22 and 8 of them — the early ones were masking survivors.
-The release lands at 80.96 with 1889 kills. Compare killed and survived counts,
-never two headline numbers. And a survivor is a lead, not a
-verdict: under `coverageAnalysis: perTest` one mutant was reported as survived
-that the suite does kill, confirmed by applying it by hand. Every fix here was
-verified that way rather than by trusting the report.
+The release lands at 81.18 with 1895 kills, and every surviving mutant on a
+line it changed is provably equivalent. Compare killed and survived counts,
+never two headline numbers.
+
+And a survivor is a lead, not a verdict: under `coverageAnalysis: perTest`,
+mutants were twice reported as survived that the suite does kill — confirmed
+by applying them by hand and watching it go red. Every fix here was verified
+that way rather than by trusting the report, which is also how the last two
+gaps surfaced: scoping the flush hook away from the Graph routes was
+documented for the wrong reason and never asserted, and nothing checked that
+a caller's `settleTimeoutMs` reaches the HTTP path at all.
 
 **Fixed: `signBody`/`verifySignature` could be called backwards in silence.**
 Both take two strings in a row, so swapping them type-checked and returned a

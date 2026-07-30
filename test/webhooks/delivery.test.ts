@@ -197,6 +197,29 @@ describe('WebhookDeliverer — inspection', () => {
   })
 })
 
+describe('WebhookDeliverer — deliveredCount', () => {
+  it('counts what the log cap evicted, so a full log still reads as progress', async () => {
+    // `flush()` repeats a round only while this number moves, and stops when it
+    // holds still. If eviction subtracted instead of being carried, a busy
+    // enough flush would read its own deliveries as "nothing happened" and
+    // return with work still due — the exact bug it exists to prevent.
+    const clock = new VirtualClock({ mode: 'frozen', start: EPOCH })
+    const deliverer = new WebhookDeliverer({
+      clock,
+      transport: async () => {},
+      maxLogEntries: 2,
+    })
+
+    for (let i = 0; i < 5; i++) deliverer.enqueue(samplePayload(), { appSecret: SECRET })
+    clock.advance(0)
+    await deliverer.settle()
+
+    expect(deliverer.log()).toHaveLength(2)
+    expect(deliverer.droppedLogEntries()).toBe(3)
+    expect(deliverer.deliveredCount()).toBe(5)
+  })
+})
+
 describe('WebhookDeliverer — transport contract', () => {
   it('passes the parsed payload alongside the raw body for inspection', async () => {
     const clock = new VirtualClock({ mode: 'frozen', start: EPOCH })

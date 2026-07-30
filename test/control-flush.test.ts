@@ -195,6 +195,20 @@ describe('what the flush must NOT do', () => {
     expect(fields).toEqual([])
   })
 
+  it('does not make a Graph read wait on the webhook receiver either', async () => {
+    // The same rule on the other verb. Covering the write and leaving the read
+    // to inference is the mistake that produced #4: one door exercised, the
+    // other free to drift.
+    mock.engine.simulateInbound({
+      from: CUSTOMER,
+      message: { type: 'text', text: { body: 'hola' } },
+    })
+
+    await fetch(`${mock.baseUrl}/v23.0/${mock.phoneNumberId}?fields=quality_rating`)
+
+    expect(fields).toEqual([])
+  })
+
   it('does not deliver a webhook twice', async () => {
     await post('/__mock/quality', { quality_rating: 'RED' })
     // A second flush of the same already-drained queue must be a no-op — the
