@@ -125,9 +125,14 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    *
    * A hook rather than a line per route: it covers inbound, statuses, quality,
    * template transitions and `time/advance` at once, and any control endpoint
-   * added later is born correct. Scoped to `/__mock/` on purpose — the Graph
-   * routes schedule their statuses at +50ms and +500ms, which are deliberately
-   * NOT due yet, and must keep needing a real `advance()`.
+   * added later is born correct.
+   *
+   * Scoped to `/__mock/` because Meta answers a send immediately and does not
+   * wait on your webhook endpoint first. A Graph route that settled here would
+   * take as long as the slowest receiver, which is both wrong and the sort of
+   * latency bug this mock exists to expose rather than absorb. It is NOT what
+   * keeps delivery statuses waiting for the clock — they are scheduled at
+   * +50ms and +500ms, so no `advance(0)` would deliver them wherever it ran.
    */
   const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
   app.addHook('onSend', async (request, _reply, payload) => {

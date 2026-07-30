@@ -170,6 +170,31 @@ describe('what the flush must NOT do', () => {
     expect(fields).toEqual(['messages'])
   })
 
+  it('does not make a Graph send wait on the webhook receiver', async () => {
+    // Meta answers a send immediately; it does not hand your endpoint anything
+    // first. A Graph route that flushed would take as long as the slowest
+    // receiver — the exact latency bug this mock is supposed to expose.
+    // Queued through the raw engine so there IS something due for a stray
+    // flush to pick up.
+    mock.engine.simulateInbound({
+      from: CUSTOMER,
+      message: { type: 'text', text: { body: 'hola' } },
+    })
+
+    await fetch(`${mock.baseUrl}/v23.0/${mock.phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        to: CUSTOMER,
+        type: 'text',
+        text: { body: 'buenas' },
+      }),
+    })
+
+    expect(fields).toEqual([])
+  })
+
   it('does not deliver a webhook twice', async () => {
     await post('/__mock/quality', { quality_rating: 'RED' })
     // A second flush of the same already-drained queue must be a no-op — the
@@ -217,6 +242,35 @@ describe('flush rounds', () => {
     engine.setQuality(engine.state.defaultPhoneNumberId, 'RED')
 
     await expect(engine.flush()).resolves.toBeUndefined()
+  })
+
+  it('honours the caller’s settle budget on the HTTP path too', async () => {
+    // The wait a control call now makes is on YOUR receiver, so the budget has
+    // to reach the server — through createWamock, into createServer, down to
+    // the hook. Anywhere that chain drops it, the 5s default silently applies
+    // and a stuck receiver holds the request for ten times as long as asked.
+    const stuck = await createWamock({
+      appSecret: 's',
+      start: EPOCH,
+      settleTimeoutMs: 250,
+      onWebhook: () => new Promise(() => {}),
+    })
+
+    try {
+      const began = Date.now()
+      const res = await fetch(`${stuck.baseUrl}/__mock/quality`, {
+        method: 'POST',
+        body: JSON.stringify({ quality_rating: 'RED' }),
+      })
+      const waited = Date.now() - began
+
+      expect(res.status).toBe(200)
+      // Generous by design: this must fail because the default took over, not
+      // because a loaded machine took an extra moment.
+      expect(waited).toBeLessThan(2_000)
+    } finally {
+      await stuck.close()
+    }
   })
 
   it('takes its timeout back down once settling beats it', async () => {
