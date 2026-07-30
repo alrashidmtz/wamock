@@ -316,7 +316,6 @@ function buildTransport(options: CreateWamockOptions) {
   })
 }
 
-
 function addressOf(app: FastifyInstance): string {
   const address = app.server.address()
   if (address === null || typeof address === 'string') {
