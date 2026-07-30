@@ -144,4 +144,59 @@ describe('VirtualClock — live mode', () => {
     expect(() => clock.stop()).not.toThrow()
     expect(() => clock.stop()).not.toThrow()
   })
+
+  it('stop() actually stops it, not merely returns quietly', async () => {
+    // "Does not throw" is satisfied by a stop() that clears nothing. The only
+    // proof is a timer that stays unfired afterwards.
+    const clock = new VirtualClock({ mode: 'live', tickMs: 5 })
+    clock.start()
+    clock.stop()
+
+    const fn = vi.fn()
+    clock.at(clock.now(), fn)
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('start() twice leaves one tick, so a single stop() ends all of it', async () => {
+    // A second interval would survive stop() and keep firing — which is how a
+    // "stopped" clock goes on delivering into the next test.
+    const clock = new VirtualClock({ mode: 'live', tickMs: 5 })
+    clock.start()
+    clock.start()
+    clock.stop()
+
+    const fn = vi.fn()
+    clock.at(clock.now(), fn)
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(fn).not.toHaveBeenCalled()
+  })
+})
+
+describe('VirtualClock — the frozen/live boundary', () => {
+  it('start() is a no-op when frozen, or determinism is gone', async () => {
+    // Everything library mode promises rests on this: a frozen clock moves only
+    // when advance() says so. A tick here would deliver webhooks on wall time
+    // and turn every timing assertion into a race.
+    const clock = new VirtualClock({ mode: 'frozen', start: 1_750_000_000_000, tickMs: 5 })
+    const fn = vi.fn()
+    clock.at(clock.now(), fn)
+
+    clock.start()
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(fn).not.toHaveBeenCalled()
+    expect(clock.now()).toBe(1_750_000_000_000)
+  })
+
+  it('reports which mode it is in, since the flush branches on it', () => {
+    // WamockEngine.flush() repeats rounds only when frozen: a live clock's tick
+    // already fires due timers, and repeating there counts unrelated concurrent
+    // deliveries as progress and never converges.
+    expect(new VirtualClock({ mode: 'frozen' }).frozen).toBe(true)
+    expect(new VirtualClock({ mode: 'live' }).frozen).toBe(false)
+    expect(new VirtualClock().frozen).toBe(true)
+  })
 })

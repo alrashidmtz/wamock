@@ -97,6 +97,22 @@ describe('swapped arguments', () => {
     expect(() => verifySignature(BODY, SECRET, header)).toThrow(/look swapped/)
   })
 
+  it('says which order is right and how to avoid the question', () => {
+    // The message IS the fix here. Matching one phrase of it leaves the rest
+    // free to rot into an empty string that diagnoses nothing, which is what
+    // the caller is left holding at 2am.
+    let message = ''
+    try {
+      signBody(BODY, SECRET)
+    } catch (error) {
+      message = (error as Error).message
+    }
+
+    expect(message).toContain('(appSecret, rawBody)')
+    expect(message).toContain('look swapped')
+    expect(message).toContain('{ appSecret, body }')
+  })
+
   it('leaves a secret that merely looks numeric alone', () => {
     // `JSON.parse('1234')` succeeds. Requiring an object, not just valid JSON,
     // is what keeps an all-digit secret from tripping the guard.
