@@ -260,15 +260,11 @@ describe('§9.6.3 — a WABA that was never subscribed', () => {
     const signup = (await post('/__mock/embedded-signup', { subscribed: false })).json()
 
     await post('/__mock/inbound', { from: CUSTOMER, text: 'hola', phone_number_id: signup.phone_number_id })
-    engine.clock.advance(0)
-    await engine.settle()
     expect(inbox).toHaveLength(0)
 
     await post(`/v19.0/${signup.waba_id}/subscribed_apps`)
 
     await post('/__mock/inbound', { from: CUSTOMER, text: 'hola otra vez', phone_number_id: signup.phone_number_id })
-    engine.clock.advance(0)
-    await engine.settle()
     expect(inbox).toHaveLength(1)
   })
 
@@ -354,8 +350,6 @@ describe('§9.6.4 — two apps, two secrets', () => {
       text: 'tenant',
       phone_number_id: 'PNID_TENANT',
     })
-    engine.clock.advance(0)
-    await engine.settle()
 
     const [platform, tenant] = inbox
     expect(verifySignature(PLATFORM_SECRET, platform!.body, platform!.signature)).toBe(true)
@@ -381,8 +375,6 @@ describe('template_status_update webhooks', () => {
     inbox.length = 0
 
     await post('/__mock/templates/order_update/es_MX/transition', { to: 'APPROVED' })
-    engine.clock.advance(0)
-    await engine.settle()
 
     const change = JSON.parse(inbox[0]!.body).entry[0].changes[0]
     expect(change.field).toBe('message_template_status_update')
@@ -401,15 +393,9 @@ describe('template_status_update webhooks', () => {
       components: [],
     })
     await post('/__mock/templates/promo/es_MX/transition', { to: 'APPROVED' })
-    // Drain the approval webhook before clearing — it is queued on the clock,
-    // not delivered synchronously.
-    engine.clock.advance(0)
-    await engine.settle()
     inbox.length = 0
 
     await post('/__mock/templates/promo/es_MX/transition', { to: 'PAUSED' })
-    engine.clock.advance(0)
-    await engine.settle()
 
     expect(JSON.parse(inbox[0]!.body).entry[0].changes[0].value).toMatchObject({
       event: 'PAUSED',
@@ -426,8 +412,6 @@ describe('quality rating', () => {
       phone_number_id: engine.state.defaultPhoneNumberId,
       quality_rating: 'RED',
     })
-    engine.clock.advance(0)
-    await engine.settle()
 
     expect(res.statusCode).toBe(200)
     const change = JSON.parse(inbox[0]!.body).entry[0].changes[0]
@@ -576,8 +560,6 @@ describe('§9.6.1 — onboarding, end to end', () => {
     await post(`/__mock/templates/bienvenida/es_MX/transition?waba_id=${signup.waba_id}`, {
       to: 'APPROVED',
     })
-    engine.clock.advance(0)
-    await engine.settle()
     expect(JSON.parse(inbox[0]!.body).entry[0].changes[0].field).toBe(
       'message_template_status_update',
     )

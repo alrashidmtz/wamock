@@ -1,4 +1,4 @@
-import { WamockEngine } from './core/engine.js'
+import { DEFAULT_SETTLE_TIMEOUT_MS, WamockEngine } from './core/engine.js'
 import type { ScenarioConfig } from './core/scenario.js'
 import type { TemplateCategory, TemplateStatus } from './core/templates.js'
 import type { OutboundMessage } from './core/types.js'
@@ -136,7 +136,11 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 
   engine.deliverer.setTransport(buildTransport(options))
 
-  const app = createServer(engine)
+  const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
+
+  // The same budget for both doors: an app pointed at `baseUrl` must not get a
+  // different answer than one calling the helpers.
+  const app = createServer(engine, { settleTimeoutMs })
   await app.listen({ port: 0, host: '127.0.0.1' })
   const baseUrl = addressOf(app)
 
@@ -155,32 +159,15 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 
   let closed = false
 
-  const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
-
   /**
    * Advance by zero and settle. Every helper does this so callers never have
    * to think about the gap between "the timer fired" and "the webhook was
    * handed over" — the classic source of a passing-then-failing assertion.
    *
-   * Bounded, because settling waits on the caller's own receiver. A hang there
-   * leaves nothing to read; a late delivery is at least diagnosable.
+   * It lives on the engine so the HTTP control API can do exactly the same
+   * thing; two implementations would be two behaviours (#4).
    */
-  let flushing = false
-  const flush = async (): Promise<void> => {
-    // A nested flush defers to the one already running. Handlers reply by
-    // calling send(), which flushes again from inside the drain it is part of;
-    // with duplicate deliveries, two handlers each wait for the drain the
-    // other is holding. The outer flush sees their work anyway, so waiting
-    // here only burned the settle timeout.
-    if (flushing) return
-    flushing = true
-    try {
-      engine.clock.advance(0)
-      await settleWithin(engine, settleTimeoutMs)
-    } finally {
-      flushing = false
-    }
-  }
+  const flush = (): Promise<void> => engine.flush(settleTimeoutMs)
 
   return {
     baseUrl,
@@ -213,7 +200,7 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
     time: {
       async advance(ms) {
         engine.clock.advance(ms)
-        await settleWithin(engine, settleTimeoutMs)
+        await engine.settleWithin(settleTimeoutMs)
       },
       now: () => engine.clock.now(),
     },
@@ -260,7 +247,7 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       engine.reset()
       // Bounded like every other wait: reset() between tests must not be the
       // place a stuck receiver freezes the run.
-      await settleWithin(engine, settleTimeoutMs)
+      await engine.settleWithin(settleTimeoutMs)
     },
 
     async close() {
@@ -278,7 +265,7 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       // otherwise hang close() forever, and a hang leaves nothing to read. A
       // late delivery is recoverable; a wedged test run is not.
       engine.deliverer.clear()
-      await settleWithin(engine, settleTimeoutMs)
+      await engine.settleWithin(settleTimeoutMs)
 
       restoreInterceptor?.()
 
@@ -329,31 +316,6 @@ function buildTransport(options: CreateWamockOptions) {
   })
 }
 
-/**
- * Long enough that any reasonable receiver finishes, short enough that a stuck
- * one does not look like a frozen test suite.
- */
-const DEFAULT_SETTLE_TIMEOUT_MS = 5_000
-
-/**
- * Await in-flight deliveries, but never longer than `timeoutMs`.
- *
- * The timer is unref'd so this can never be the reason a process stays alive —
- * a teardown helper that holds the event loop open would be its own bug.
- */
-async function settleWithin(engine: WamockEngine, timeoutMs: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const expiry = new Promise<void>((resolve) => {
-    timer = setTimeout(resolve, timeoutMs)
-    timer.unref?.()
-  })
-
-  try {
-    await Promise.race([engine.settle(), expiry])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
-}
 
 function addressOf(app: FastifyInstance): string {
   const address = app.server.address()

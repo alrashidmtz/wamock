@@ -99,6 +99,15 @@ export class WebhookDeliverer {
     return this.#droppedLogEntries
   }
 
+  /**
+   * Deliveries attempted so far, evicted ones included. Counts failures too:
+   * `flush()` uses this to tell "nothing left to do" from "the receiver is
+   * rejecting", and only the first means it can stop.
+   */
+  deliveredCount(): number {
+    return this.#log.length + this.#droppedLogEntries
+  }
+
   /** Drop the log and cancel anything still scheduled. Part of `reset()`. */
   clear(): void {
     for (const timerId of this.#pending) this.#clock.clear(timerId)

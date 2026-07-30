@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import type { FastifyBodyParser, FastifyInstance } from 'fastify'
 
 import { registerControlRoutes } from './control/routes.js'
+import { DEFAULT_SETTLE_TIMEOUT_MS } from './core/engine.js'
 import type { WamockEngine } from './core/engine.js'
 import { ERROR_CODES, GraphError } from './errors/graph-error.js'
 
@@ -34,6 +35,11 @@ export interface ServerOptions {
   logger?: boolean
   /** Max accepted request body, in bytes. Defaults to 1 MiB. */
   bodyLimit?: number
+  /**
+   * How long a control-API call waits for the receiver to take the webhooks it
+   * triggered. Bounded so a hung receiver cannot hold the request open.
+   */
+  settleTimeoutMs?: number
 }
 
 export function createServer(engine: WamockEngine, options: ServerOptions = {}): FastifyInstance {
@@ -108,6 +114,26 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   // message that describes the symptom and hides the cause.
   app.addContentTypeParser('*', { parseAs: 'string' }, parseControlBody)
   app.addContentTypeParser('text/plain', { parseAs: 'string' }, parseControlBody)
+
+  /**
+   * Hand over the webhooks this control call triggered before answering it.
+   *
+   * The library helpers have always done this (`createWamock`'s `flush`), and
+   * the HTTP door did not — so `POST /__mock/quality` changed the rating,
+   * returned 200, and delivered nothing until something moved the clock. The
+   * README promises it "announces it"; this is what makes that true (#4).
+   *
+   * A hook rather than a line per route: it covers inbound, statuses, quality,
+   * template transitions and `time/advance` at once, and any control endpoint
+   * added later is born correct. Scoped to `/__mock/` on purpose — the Graph
+   * routes schedule their statuses at +50ms and +500ms, which are deliberately
+   * NOT due yet, and must keep needing a real `advance()`.
+   */
+  const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
+  app.addHook('onSend', async (request, _reply, payload) => {
+    if (request.url.startsWith('/__mock/')) await engine.flush(settleTimeoutMs)
+    return payload
+  })
 
   registerControlRoutes(app, engine)
 
