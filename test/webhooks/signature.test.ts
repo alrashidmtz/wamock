@@ -111,17 +111,38 @@ describe('swapped arguments', () => {
     expect(message).toContain('(appSecret, rawBody)')
     expect(message).toContain('look swapped')
     expect(message).toContain('{ appSecret, body }')
+    expect(message).toContain('your call site')
   })
+
+  // A JSON body satisfies the guard's second clause on its own, so the secret
+  // is never examined and any mistake in that half goes unseen. These pass a
+  // body that is plainly not JSON, which is what puts the secret on trial.
+  const PLAIN = 'not json at all'
 
   it('leaves a secret that merely looks numeric alone', () => {
     // `JSON.parse('1234')` succeeds. Requiring an object, not just valid JSON,
     // is what keeps an all-digit secret from tripping the guard.
-    expect(() => signBody('1234567890', BODY)).not.toThrow()
-    expect(() => signBody('null', BODY)).not.toThrow()
+    expect(() => signBody('1234567890', PLAIN)).not.toThrow()
+    expect(() => signBody('null', PLAIN)).not.toThrow()
+    expect(() => signBody('"quoted"', PLAIN)).not.toThrow()
   })
 
   it('leaves a secret that merely starts with a brace alone', () => {
-    expect(() => signBody('{not-json-at-all', BODY)).not.toThrow()
+    // Opens like JSON, is not JSON. The parse has to decide, not the brace.
+    expect(() => signBody('{not-json-at-all', PLAIN)).not.toThrow()
+  })
+
+  it('sees a JSON secret through leading whitespace', () => {
+    // A body arriving with leading whitespace is ordinary; trimming the wrong
+    // end would let exactly that shape of swap past.
+    expect(() => signBody('  {"object":"whatsapp_business_account"}', PLAIN)).toThrow(
+      /look swapped/,
+    )
+  })
+
+  it('catches a JSON array in the secret slot, not just an object', () => {
+    // `entry` is an array, and a caller slicing a payload can land one here.
+    expect(() => signBody('[{"id":1}]', PLAIN)).toThrow(/look swapped/)
   })
 
   it('stays silent when BOTH arguments are JSON — a known, deliberate gap', () => {

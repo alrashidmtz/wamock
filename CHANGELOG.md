@@ -43,6 +43,23 @@ silent inbound at the one cause that had been ruled out. The payload is built in
 one place now, and a round-trip assertion guards the whole class rather than
 this one field.
 
+**Test quality.** Mutation score 80.40 → 81.09, threshold 78 → 79, 526 → 556
+tests. Three of the tests these fixes leaned on asserted the wrong thing:
+`clock.stop()` was covered by "does not throw", which a `stop()` that clears
+nothing satisfies perfectly; `start()` being a no-op on a frozen clock — the
+thing every timing assertion in library mode rests on — was not covered at all;
+and the new swap guard's leniency cases all passed a JSON body, which satisfies
+the guard's second clause on its own and left the half that examines the secret
+unobserved.
+
+Two things about the score itself, learned the hard way and now written into
+`stryker.config.json`. It moves about a point between runs of identical code,
+because a timeout counts as a kill and how many time out depends on machine
+load — 82.07 busy, 81.09 idle, same commit. And a survivor is a lead, not a
+verdict: under `coverageAnalysis: perTest` one mutant was reported as survived
+that the suite does kill, confirmed by applying it by hand. Every fix here was
+verified that way rather than by trusting the report.
+
 **Fixed: `signBody`/`verifySignature` could be called backwards in silence.**
 Both take two strings in a row, so swapping them type-checked and returned a
 well-formed `sha256=…` that never verified — sending you to audit your own HMAC

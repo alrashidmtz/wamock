@@ -1,6 +1,8 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "_comment": "Mutation testing answers what coverage cannot: would these tests actually catch a bug? Stryker introduces defects on purpose and reports how many the suite fails to notice. Run with `npm run test:mutation`; it is slow by design and not part of `npm run check`. The json reporter is on so a run leaves machine-readable output: without it reports/ kept a mutation.json from an older run, which reads exactly like a fresh one and reports different line numbers.",
+  "_comment_score_is_noisy": "The score moves about a point between runs of IDENTICAL code, because a timeout counts as a kill and how many mutants time out depends on how loaded the machine is. Measured: 82.07 on a busy laptop and 81.09 on an idle one, same commit. Read the survivor list, not the headline. It also means a slow CI runner scores HIGHER, not lower, so `break` is set against the idle-machine figure — the honest floor.",
+  "_comment_verify_by_hand": "A survivor is a lead, not a verdict. With coverageAnalysis perTest, Stryker has reported mutants as survived that the suite does in fact kill — confirmed by applying the mutation by hand and watching it go red. Do that before writing a test for one.",
   "packageManager": "npm",
   "testRunner": "vitest",
   "reporters": [
@@ -22,6 +24,6 @@
   "thresholds": {
     "high": 85,
     "low": 80,
-    "break": 78
+    "break": 79
   }
 }
