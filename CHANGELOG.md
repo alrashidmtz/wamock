@@ -43,7 +43,7 @@ silent inbound at the one cause that had been ruled out. The payload is built in
 one place now, and a round-trip assertion guards the whole class rather than
 this one field.
 
-**Test quality.** Mutation kills 1846 → 1895, threshold 78 → 79, 526 → 561
+**Test quality.** Mutation kills 1846 → 1898, threshold 78 → 79, 526 → 561
 tests. Four of the tests these fixes leaned on asserted the wrong thing:
 `clock.stop()` was covered by "does not throw", which a `stop()` that clears
 nothing satisfies perfectly; `start()` being a no-op on a frozen clock — what
@@ -58,7 +58,7 @@ rather than relearned. **The headline score can fall while the suite strictly
 improves**: 82.07, then 81.09, then 80.88 across three runs of this branch,
 while kills rose 1846 → 1887 the whole way. A timeout counts as a kill, and
 those runs had 77, 22 and 8 of them — the early ones were masking survivors.
-The release lands at 81.18 with 1895 kills, and every surviving mutant on a
+The release lands at 81.31 with 1898 kills, and every surviving mutant on a
 line it changed is provably equivalent. Compare killed and survived counts,
 never two headline numbers.
 
