@@ -160,12 +160,13 @@ await mock.reset()
 Time is virtual and frozen by default, so tests are deterministic — the same
 script produces the same message ids on every run.
 
-### Delivery statuses need the clock to move
+### Webhooks with a delay need the clock to move
 
-Meta sends `sent` and `delivered` as webhooks *after* the send, never as its
-response — and here they are due at a virtual instant that never arrives on its
-own, because the clock is frozen. Asserting right after `send()` finds nothing
-and reads like a broken mock rather than a stopped clock:
+A webhook due *later* is due at a virtual instant that never arrives on its own,
+because the clock is frozen. Delivery statuses are the case you meet first:
+Meta sends `sent` and `delivered` as webhooks after the send, never as its
+response, so asserting right after `send()` finds nothing and reads like a
+broken mock rather than a stopped clock:
 
 ```ts
 await mock.send({ to: CUSTOMER, text: 'hola' })
@@ -176,6 +177,11 @@ await mock.time.advance(60_000)   // now `sent` and `delivered` have arrived
 
 This is deliberate: real statuses do not arrive synchronously either, and a
 mock that delivered them instantly would hide every ordering bug.
+
+Anything with **no** delay of its own — an inbound message, a quality change, a
+template transition — arrives before the call that caused it returns, whether
+you made it through a helper or with `curl` against the control API. You never
+have to advance the clock to see those.
 
 ### Your app's clock is not wamock's clock
 
