@@ -59,3 +59,69 @@ describe('verifySignature', () => {
     expect(verifySignature(SECRET, BODY, short)).toBe(false)
   })
 })
+
+describe('the options form', () => {
+  it('signs the same bytes as the positional form', () => {
+    expect(signBody({ appSecret: SECRET, body: BODY })).toBe(signBody(SECRET, BODY))
+  })
+
+  it('verifies what it signed', () => {
+    const header = signBody({ appSecret: SECRET, body: BODY })
+    expect(verifySignature({ appSecret: SECRET, body: BODY, header })).toBe(true)
+  })
+
+  it('still rejects the wrong secret, and an absent header', () => {
+    const header = signBody({ appSecret: 'another-app-secret', body: BODY })
+    expect(verifySignature({ appSecret: SECRET, body: BODY, header })).toBe(false)
+    expect(verifySignature({ appSecret: SECRET, body: BODY, header: undefined })).toBe(false)
+  })
+
+  it('cannot be swapped, so it is never guarded', () => {
+    // Naming the fields is the point: there is no wrong order to protect from,
+    // so a body-shaped secret here is the caller's business and not an error.
+    expect(() => signBody({ appSecret: BODY, body: SECRET })).not.toThrow()
+  })
+})
+
+describe('swapped arguments', () => {
+  it('refuses to sign with the arguments the wrong way round', () => {
+    // The field report's exact mistake: a helper of the caller's own is
+    // `firmar(body, secret)`, and muscle memory writes that order here. It used
+    // to return a well-formed signature that never verified, which sends you to
+    // audit your own HMAC check rather than your call.
+    expect(() => signBody(BODY, SECRET)).toThrow(/look swapped/)
+  })
+
+  it('refuses to verify with them the wrong way round', () => {
+    const header = signBody(SECRET, BODY)
+    expect(() => verifySignature(BODY, SECRET, header)).toThrow(/look swapped/)
+  })
+
+  it('leaves a secret that merely looks numeric alone', () => {
+    // `JSON.parse('1234')` succeeds. Requiring an object, not just valid JSON,
+    // is what keeps an all-digit secret from tripping the guard.
+    expect(() => signBody('1234567890', BODY)).not.toThrow()
+    expect(() => signBody('null', BODY)).not.toThrow()
+  })
+
+  it('leaves a secret that merely starts with a brace alone', () => {
+    expect(() => signBody('{not-json-at-all', BODY)).not.toThrow()
+  })
+
+  it('stays silent when BOTH arguments are JSON — a known, deliberate gap', () => {
+    // The guard needs the asymmetry: a JSON secret AND a non-JSON body. Signing
+    // one document with another as the key is almost certainly a swap too, but
+    // "almost certainly" is not a bar worth throwing on, and a caller doing it
+    // on purpose must not be refused. Documented rather than quietly true.
+    expect(() => signBody(BODY, '{"also":"json"}')).not.toThrow()
+  })
+
+  it('never lets a request body reach the guard', () => {
+    // The guard throws, and verifySignature is documented never to throw. Both
+    // stay true because only `appSecret` is inspected, and that half is never
+    // attacker-controlled — no request can turn this into a 500.
+    for (const hostile of ['{"a":1}', '[]', '{}', '  {"nested":{"deep":true}}']) {
+      expect(verifySignature(SECRET, hostile, 'sha256=zzzz')).toBe(false)
+    }
+  })
+})

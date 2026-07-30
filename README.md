@@ -112,6 +112,22 @@ Verify against `JSON.stringify(req.body)` and you'll pass every test, then fail
 the first time key order or whitespace differs. wamock signs exactly what it
 sends.
 
+The same helpers wamock signs with are exported, so your receiver can be tested
+against them directly:
+
+```ts
+import { verifySignature } from 'wamock'
+
+verifySignature({ appSecret, body: rawBody, header: signature })
+```
+
+Name the fields. The positional form — `verifySignature(appSecret, rawBody,
+signature)` — still works and is deprecated, because two adjacent strings have
+no safe order: `createHmac(alg, key)` puts the key first, most `sign(payload,
+secret)` helpers put it second, and getting it backwards used to return a
+well-formed `sha256=…` that simply never verified. wamock now refuses that call
+instead of handing you a signature to distrust your own HMAC check over.
+
 ---
 
 ## Use it as a library
