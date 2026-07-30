@@ -152,6 +152,24 @@ describe('what the flush must NOT do', () => {
     expect(statuses).toEqual(['sent', 'delivered'])
   })
 
+  it('does not report a stale delivery count on the way to draining', async () => {
+    // Enqueued through the raw engine, the one door with no flush of its own,
+    // so /__mock/state meets a queue it has to drain before it can be honest.
+    // Answering from a snapshot taken first would put the readout one delivery
+    // behind — the same class of lie as the Set that serialized to `{}`.
+    mock.engine.simulateInbound({
+      from: CUSTOMER,
+      message: { type: 'text', text: { body: 'hola' } },
+    })
+
+    const state = (await (await fetch(`${mock.baseUrl}/__mock/state`)).json()) as {
+      webhooksDelivered: number
+    }
+
+    expect(state.webhooksDelivered).toBe(fields.length)
+    expect(fields).toEqual(['messages'])
+  })
+
   it('does not deliver a webhook twice', async () => {
     await post('/__mock/quality', { quality_rating: 'RED' })
     // A second flush of the same already-drained queue must be a no-op — the

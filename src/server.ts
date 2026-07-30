@@ -135,6 +135,26 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     return payload
   })
 
+  /**
+   * A read flushes BEFORE it answers, not after.
+   *
+   * `onSend` runs once the handler has already built its payload, which is the
+   * right moment for a write — the deliveries it causes do not exist until it
+   * runs. For a read it is one moment too late: `/__mock/state` would report a
+   * delivery count taken before the queue it is about to drain, so the endpoint
+   * meant to be pasted into bug reports would be off by one. That is the same
+   * class of lie as #3, and not one to reintroduce next to its fix.
+   *
+   * Reads only, deliberately. Draining ahead of `POST /__mock/reset` would push
+   * the previous test's webhooks into the receiver on the way to clearing them,
+   * which is the opposite of what a reset is for.
+   */
+  app.addHook('preHandler', async (request) => {
+    if (request.method === 'GET' && request.url.startsWith('/__mock/')) {
+      await engine.flush(settleTimeoutMs)
+    }
+  })
+
   registerControlRoutes(app, engine)
 
   app.post<{ Params: { version: string; phoneNumberId: string } }>(
