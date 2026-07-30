@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import type { WamockEngine } from '../core/engine.js'
 import { TEMPLATE_STATUSES } from '../core/templates.js'
+import type { PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import type { InboundContent } from '../webhooks/payloads.js'
 
@@ -131,6 +132,52 @@ function describeIssues(error: z.ZodError): string {
   return error.issues
     .map((issue) => (issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
     .join('; ')
+}
+
+/** A WABA as `/__mock/state` reports it: `subscribedApps` flattened to an array. */
+interface WabaView {
+  wabaId: string
+  appId: string
+  subscribedApps: string[]
+}
+
+export interface StateSnapshot {
+  now: number
+  phoneNumbers: PhoneNumber[]
+  wabas: WabaView[]
+  outboundCount: number
+  webhooksDelivered: number
+  droppedOutbound: number
+  droppedWebhookLog: number
+}
+
+/**
+ * The body of `GET /__mock/state`, built here rather than inline in the route
+ * so there is exactly one place where an internal shape can leak into JSON.
+ *
+ * That mattered once already: `Waba.subscribedApps` is a `Set`, and
+ * `JSON.stringify(new Set(['a']))` is `{}` — so every WABA read as
+ * unsubscribed, in the reports this endpoint exists to serve. The declared
+ * return type keeps the next `Set`, `Map` or `Date` from getting this far, and
+ * a round-trip test in test/server.test.ts backs it at runtime.
+ */
+export function buildStateSnapshot(engine: WamockEngine): StateSnapshot {
+  return {
+    now: engine.clock.now(),
+    // Deliberately no app secrets: this endpoint is meant to be curl-ed and
+    // pasted into bug reports.
+    phoneNumbers: engine.state.phoneNumbers(),
+    wabas: engine.state.wabas().map((waba) => ({
+      wabaId: waba.wabaId,
+      appId: waba.appId,
+      subscribedApps: [...waba.subscribedApps],
+    })),
+    outboundCount: engine.state.outbound().length,
+    webhooksDelivered: engine.deliverer.log().length,
+    // Reported so a truncated history never looks like a complete one.
+    droppedOutbound: engine.state.droppedOutbound(),
+    droppedWebhookLog: engine.deliverer.droppedLogEntries(),
+  }
 }
 
 export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine): void {
@@ -291,20 +338,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     reply.send({ messages: engine.state.outbound() }),
   )
 
-  app.get('/__mock/state', async (_request, reply) =>
-    reply.send({
-      now: engine.clock.now(),
-      // Deliberately no app secrets: this endpoint is meant to be curl-ed and
-      // pasted into bug reports.
-      phoneNumbers: engine.state.phoneNumbers(),
-      wabas: engine.state.wabas(),
-      outboundCount: engine.state.outbound().length,
-      webhooksDelivered: engine.deliverer.log().length,
-      // Reported so a truncated history never looks like a complete one.
-      droppedOutbound: engine.state.droppedOutbound(),
-      droppedWebhookLog: engine.deliverer.droppedLogEntries(),
-    }),
-  )
+  app.get('/__mock/state', async (_request, reply) => reply.send(buildStateSnapshot(engine)))
 
   app.post('/__mock/reset', async (_request, reply) => {
     engine.reset()
