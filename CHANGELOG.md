@@ -29,6 +29,12 @@ and a test asserts exactly that so the fix cannot over-reach.
 The mock's own suite had 11 hand-written `advance(0)` drains after control
 calls, which is why the two doors were free to drift. They are gone.
 
+Reads flush *before* they answer rather than after. Draining once the payload
+is built is right for a write, whose deliveries do not exist until its handler
+runs, and one moment too late for a read: `/__mock/state` briefly reported a
+delivery count from before the queue it was about to drain. Same defect as the
+`Set` below, found by measuring rather than by reasoning about the hook order.
+
 **Fixed: `GET /__mock/state` reported every WABA as unsubscribed.**
 `subscribedApps` is a `Set`, and `JSON.stringify(new Set(['a']))` is `{}` — so
 the endpoint whose stated job is to be pasted into bug reports contradicted the
