@@ -43,19 +43,22 @@ silent inbound at the one cause that had been ruled out. The payload is built in
 one place now, and a round-trip assertion guards the whole class rather than
 this one field.
 
-**Test quality.** Mutation score 80.40 → 81.09, threshold 78 → 79, 526 → 556
-tests. Three of the tests these fixes leaned on asserted the wrong thing:
+**Test quality.** Mutation kills 1846 → 1887, threshold 78 → 79, 526 → 557
+tests. Four of the tests these fixes leaned on asserted the wrong thing:
 `clock.stop()` was covered by "does not throw", which a `stop()` that clears
-nothing satisfies perfectly; `start()` being a no-op on a frozen clock — the
-thing every timing assertion in library mode rests on — was not covered at all;
-and the new swap guard's leniency cases all passed a JSON body, which satisfies
-the guard's second clause on its own and left the half that examines the secret
-unobserved.
+nothing satisfies perfectly; `start()` being a no-op on a frozen clock — what
+every timing assertion in library mode rests on — was not covered at all; the
+new swap guard's leniency cases all passed a JSON body, which satisfies the
+guard's second clause on its own and left the half that examines the secret
+unobserved; and the bounded settle never asserted that it takes its timeout
+back down, so every flush could have left a five-second timer armed.
 
-Two things about the score itself, learned the hard way and now written into
-`stryker.config.json`. It moves about a point between runs of identical code,
-because a timeout counts as a kill and how many time out depends on machine
-load — 82.07 busy, 81.09 idle, same commit. And a survivor is a lead, not a
+Two things about the metric itself, now written into `stryker.config.json`
+rather than relearned. **The headline score can fall while the suite strictly
+improves**: 82.07, then 81.09, then 80.88 across these three runs, while kills
+rose 1846 → 1887 the whole way. A timeout counts as a kill, and the runs had 77,
+22 and 8 of them — the early ones were masking survivors. Compare killed and
+survived counts, never two headline numbers. And a survivor is a lead, not a
 verdict: under `coverageAnalysis: perTest` one mutant was reported as survived
 that the suite does kill, confirmed by applying it by hand. Every fix here was
 verified that way rather than by trusting the report.

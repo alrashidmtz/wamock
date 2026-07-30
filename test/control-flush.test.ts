@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { WamockEngine } from '../src/core/engine.js'
 import { createWamock } from '../src/lib.js'
@@ -217,5 +217,22 @@ describe('flush rounds', () => {
     engine.setQuality(engine.state.defaultPhoneNumberId, 'RED')
 
     await expect(engine.flush()).resolves.toBeUndefined()
+  })
+
+  it('takes its timeout back down once settling beats it', async () => {
+    // The bound is a race between settling and a timer, and the winner does
+    // not cancel the loser on its own. Every helper flushes, so a timeout left
+    // armed each time is a 5-second timer per call — unref'd, so nothing hangs
+    // and nothing complains, which is exactly why it needs asserting.
+    vi.useFakeTimers()
+    try {
+      const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+
+      await engine.settleWithin(5_000)
+
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
