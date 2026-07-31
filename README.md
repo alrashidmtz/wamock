@@ -21,11 +21,13 @@ npx wamock@latest start --app-secret shhh --webhook-url http://localhost:3000/we
 <sub>**pnpm users:** pin the exact version — `pnpm add -D wamock@<version>`,
 using the version in the npm badge above. pnpm's `minimumReleaseAge` skips
 recently published packages as a supply-chain measure, and it filters by publish
-age rather than by tag, so **`wamock@latest` does not get around it** — it
-resolves to whatever is old enough, which today means 0.1.0. An exact version
-does, as does `--config.minimumReleaseAge=0` if you would rather not pin.
-npm and a plain `npx wamock@latest` are unaffected. Landing on 0.1.0 and
-wondering where `interceptGraph` went is a bad first ten minutes.</sub>
+age rather than by tag, so **`wamock@latest` does not get around it**. It
+silently resolves to whatever release happens to be old enough — an arbitrarily
+old one, and if none is yet, the install fails outright. An exact version gets
+past it, as does `--config.minimumReleaseAge=0` if you would rather not pin.
+npm and a plain `npx wamock@latest` are unaffected. Landing on some ancient
+release and wondering where a documented feature went is a bad first ten
+minutes.</sub>
 
 ```bash
 curl -X POST localhost:4004/__mock/inbound \
