@@ -232,8 +232,12 @@ jobs:
           IMAGE: ${{ steps.meta.outputs.tags }}
         run: |
           TAG="$(echo "$IMAGE" | head -n1)"
+          # --port is genuinely needed here, because this one publishes 4005
+          # rather than the image's default. --host is not: the ENTRYPOINT
+          # supplies it, and spelling it out again is what let the CMD bug hide
+          # in the amd64 step above until 0.3.1.
           docker run -d --name wamock-arm64 --platform linux/arm64 -p 4005:4005 "$TAG" \
-            --port=4005 --host=0.0.0.0 --app-secret=smoke --quiet
+            --port=4005 --app-secret=smoke --quiet
 
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:4005/__mock/state >/dev/null; then break; fi
