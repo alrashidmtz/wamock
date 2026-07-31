@@ -8,8 +8,11 @@ services:
     image: ghcr.io/alrashidmtz/wamock:edge
     command:
       - --port=4004
-      # Required inside a container; loopback would be unreachable from the
-      # host. Safe here because the container boundary limits who can connect.
+      # The image already binds 0.0.0.0 from its ENTRYPOINT — loopback inside a
+      # container is unreachable even with a published port, and the container
+      # boundary is what makes the wider binding acceptable. Repeated here only
+      # because a copied example should show what it is running; the parser
+      # takes the last occurrence, so this is also where you would change it.
       - --host=0.0.0.0
       - --app-secret=ci-test-secret
       - --webhook-url=http://app:3000/webhook
