@@ -88,7 +88,7 @@ describe('WebhookDeliverer — signing', () => {
     await deliverer.settle()
 
     const sent = received[0]!
-    expect(verifySignature(SECRET, sent.body, sent.signature)).toBe(true)
+    expect(verifySignature({ appSecret: SECRET, body: sent.body, header: sent.signature })).toBe(true)
   })
 
   it('signs with the secret it was given, not a global one', async () => {
@@ -99,8 +99,8 @@ describe('WebhookDeliverer — signing', () => {
     await deliverer.settle()
 
     const sent = received[0]!
-    expect(verifySignature('tenant-secret', sent.body, sent.signature)).toBe(true)
-    expect(verifySignature('platform-secret', sent.body, sent.signature)).toBe(false)
+    expect(verifySignature({ appSecret: 'tenant-secret', body: sent.body, header: sent.signature })).toBe(true)
+    expect(verifySignature({ appSecret: 'platform-secret', body: sent.body, header: sent.signature })).toBe(false)
   })
 })
 
@@ -194,6 +194,29 @@ describe('WebhookDeliverer — inspection', () => {
     await deliverer.settle()
 
     expect(received).toHaveLength(0)
+  })
+})
+
+describe('WebhookDeliverer — deliveredCount', () => {
+  it('counts what the log cap evicted, so a full log still reads as progress', async () => {
+    // `flush()` repeats a round only while this number moves, and stops when it
+    // holds still. If eviction subtracted instead of being carried, a busy
+    // enough flush would read its own deliveries as "nothing happened" and
+    // return with work still due — the exact bug it exists to prevent.
+    const clock = new VirtualClock({ mode: 'frozen', start: EPOCH })
+    const deliverer = new WebhookDeliverer({
+      clock,
+      transport: async () => {},
+      maxLogEntries: 2,
+    })
+
+    for (let i = 0; i < 5; i++) deliverer.enqueue(samplePayload(), { appSecret: SECRET })
+    clock.advance(0)
+    await deliverer.settle()
+
+    expect(deliverer.log()).toHaveLength(2)
+    expect(deliverer.droppedLogEntries()).toBe(3)
+    expect(deliverer.deliveredCount()).toBe(5)
   })
 })
 

@@ -24,7 +24,7 @@ function buildApp(mock: () => Wamock) {
   return {
     async handleWebhook(rawBody: string, signature: string | undefined) {
       // Verify against the RAW bytes — never a re-serialized object.
-      if (!verifySignature('test-secret', rawBody, signature)) {
+      if (!verifySignature({ appSecret: 'test-secret', body: rawBody, header: signature })) {
         throw new Error('bad signature')
       }
 

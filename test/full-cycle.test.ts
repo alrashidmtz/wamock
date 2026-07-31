@@ -82,7 +82,7 @@ describe('the full lifecycle, with no network', () => {
     // `message_template_status_update` webhook, and asserting on inbox[0]
     // would silently depend on delivery order.
     const inboundDelivery = inbox.find((raw) => valueOf(raw).messages)!
-    expect(verifySignature(SECRET, inboundDelivery.body, inboundDelivery.signature)).toBe(true)
+    expect(verifySignature({ appSecret: SECRET, body: inboundDelivery.body, header: inboundDelivery.signature })).toBe(true)
     expect(valueOf(inboundDelivery).messages[0].from).toBe(CUSTOMER)
     expect(valueOf(inboundDelivery).messages[0].from).not.toContain('+')
 

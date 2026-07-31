@@ -69,6 +69,11 @@ export class VirtualClock implements Clock {
     this.#base = options.start ?? Date.now()
   }
 
+  /** Whether time only moves via `advance()`. Nothing else will fire a due timer. */
+  get frozen(): boolean {
+    return this.#mode === 'frozen'
+  }
+
   now(): number {
     return (this.#mode === 'frozen' ? this.#base : Date.now()) + this.#offset
   }

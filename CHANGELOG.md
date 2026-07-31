@@ -4,6 +4,81 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.3.0] — 2026-07-30
+
+Three defects from field-testing a real integration against wamock (#3, #4,
+#5). Two of them were reported as smaller than they turned out to be.
+
+**Behaviour change — the control API now delivers before it answers.** A
+webhook with no delay of its own is scheduled at the current instant, and a
+frozen clock never reaches an instant by itself. The library helpers always
+closed that gap; the HTTP door never did. So `POST /__mock/quality` changed the
+rating, returned `200`, and announced nothing — against a README that says it
+"announces it". The same held for template transitions, inbound messages and
+forced statuses, and `/__mock/time/advance` moved the clock without waiting for
+what it had kicked off.
+
+This was filed as a documentation issue. It was not: the delay is real for
+delivery statuses (`sent` at +50ms, `delivered` at +500ms, deliberately) and
+absent for everything else. The flush now lives on the engine and both front
+doors call it, so they cannot answer differently. **If you have a test
+asserting that no webhook arrived before an `advance()` following a control-API
+call, it will now see one.** Delivery statuses still need the clock to move,
+and a test asserts exactly that so the fix cannot over-reach.
+
+The mock's own suite had 11 hand-written `advance(0)` drains after control
+calls, which is why the two doors were free to drift. They are gone.
+
+Reads flush *before* they answer rather than after. Draining once the payload
+is built is right for a write, whose deliveries do not exist until its handler
+runs, and one moment too late for a read: `/__mock/state` briefly reported a
+delivery count from before the queue it was about to drain. Same defect as the
+`Set` below, found by measuring rather than by reasoning about the hook order.
+
+**Fixed: `GET /__mock/state` reported every WABA as unsubscribed.**
+`subscribedApps` is a `Set`, and `JSON.stringify(new Set(['a']))` is `{}` — so
+the endpoint whose stated job is to be pasted into bug reports contradicted the
+three other signals that say a WABA is subscribed, and pointed anyone debugging
+silent inbound at the one cause that had been ruled out. The payload is built in
+one place now, and a round-trip assertion guards the whole class rather than
+this one field.
+
+**Test quality.** Mutation kills 1846 → 1898, threshold 78 → 79, 526 → 561
+tests. Four of the tests these fixes leaned on asserted the wrong thing:
+`clock.stop()` was covered by "does not throw", which a `stop()` that clears
+nothing satisfies perfectly; `start()` being a no-op on a frozen clock — what
+every timing assertion in library mode rests on — was not covered at all; the
+new swap guard's leniency cases all passed a JSON body, which satisfies the
+guard's second clause on its own and left the half that examines the secret
+unobserved; and the bounded settle never asserted that it takes its timeout
+back down, so every flush could have left a five-second timer armed.
+
+Two things about the metric itself, now written into `stryker.config.json`
+rather than relearned. **The headline score can fall while the suite strictly
+improves**: 82.07, then 81.09, then 80.88 across three runs of this branch,
+while kills rose 1846 → 1887 the whole way. A timeout counts as a kill, and
+those runs had 77, 22 and 8 of them — the early ones were masking survivors.
+The release lands at 81.31 with 1898 kills, and every surviving mutant on a
+line it changed is provably equivalent. Compare killed and survived counts,
+never two headline numbers.
+
+And a survivor is a lead, not a verdict: under `coverageAnalysis: perTest`,
+mutants were twice reported as survived that the suite does kill — confirmed
+by applying them by hand and watching it go red. Every fix here was verified
+that way rather than by trusting the report, which is also how the last two
+gaps surfaced: scoping the flush hook away from the Graph routes was
+documented for the wrong reason and never asserted, and nothing checked that
+a caller's `settleTimeoutMs` reaches the HTTP path at all.
+
+**Fixed: `signBody`/`verifySignature` could be called backwards in silence.**
+Both take two strings in a row, so swapping them type-checked and returned a
+well-formed `sha256=…` that never verified — sending you to audit your own HMAC
+check rather than your call. Both now accept `{ appSecret, body }`, which has no
+order to get wrong. The positional form is deprecated but still compiles, so no
+correct caller breaks; it throws when the arguments have visibly traded roles.
+`verifySignature` still never throws for anything a request can reach — only the
+app secret is inspected, and that half is never attacker-controlled.
+
 ## [0.2.12] — 2026-07-29
 
 **No behaviour change. `dist/` is byte-identical to 0.2.11** — verified by

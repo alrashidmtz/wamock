@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import type { FastifyBodyParser, FastifyInstance } from 'fastify'
 
 import { registerControlRoutes } from './control/routes.js'
+import { DEFAULT_SETTLE_TIMEOUT_MS } from './core/engine.js'
 import type { WamockEngine } from './core/engine.js'
 import { ERROR_CODES, GraphError } from './errors/graph-error.js'
 
@@ -34,6 +35,11 @@ export interface ServerOptions {
   logger?: boolean
   /** Max accepted request body, in bytes. Defaults to 1 MiB. */
   bodyLimit?: number
+  /**
+   * How long a control-API call waits for the receiver to take the webhooks it
+   * triggered. Bounded so a hung receiver cannot hold the request open.
+   */
+  settleTimeoutMs?: number
 }
 
 export function createServer(engine: WamockEngine, options: ServerOptions = {}): FastifyInstance {
@@ -108,6 +114,51 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   // message that describes the symptom and hides the cause.
   app.addContentTypeParser('*', { parseAs: 'string' }, parseControlBody)
   app.addContentTypeParser('text/plain', { parseAs: 'string' }, parseControlBody)
+
+  /**
+   * Hand over the webhooks this control call triggered before answering it.
+   *
+   * The library helpers have always done this (`createWamock`'s `flush`), and
+   * the HTTP door did not — so `POST /__mock/quality` changed the rating,
+   * returned 200, and delivered nothing until something moved the clock. The
+   * README promises it "announces it"; this is what makes that true (#4).
+   *
+   * A hook rather than a line per route: it covers inbound, statuses, quality,
+   * template transitions and `time/advance` at once, and any control endpoint
+   * added later is born correct.
+   *
+   * Scoped to `/__mock/` because Meta answers a send immediately and does not
+   * wait on your webhook endpoint first. A Graph route that settled here would
+   * take as long as the slowest receiver, which is both wrong and the sort of
+   * latency bug this mock exists to expose rather than absorb. It is NOT what
+   * keeps delivery statuses waiting for the clock — they are scheduled at
+   * +50ms and +500ms, so no `advance(0)` would deliver them wherever it ran.
+   */
+  const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
+  app.addHook('onSend', async (request, _reply, payload) => {
+    if (request.url.startsWith('/__mock/')) await engine.flush(settleTimeoutMs)
+    return payload
+  })
+
+  /**
+   * A read flushes BEFORE it answers, not after.
+   *
+   * `onSend` runs once the handler has already built its payload, which is the
+   * right moment for a write — the deliveries it causes do not exist until it
+   * runs. For a read it is one moment too late: `/__mock/state` would report a
+   * delivery count taken before the queue it is about to drain, so the endpoint
+   * meant to be pasted into bug reports would be off by one. That is the same
+   * class of lie as #3, and not one to reintroduce next to its fix.
+   *
+   * Reads only, deliberately. Draining ahead of `POST /__mock/reset` would push
+   * the previous test's webhooks into the receiver on the way to clearing them,
+   * which is the opposite of what a reset is for.
+   */
+  app.addHook('preHandler', async (request) => {
+    if (request.method === 'GET' && request.url.startsWith('/__mock/')) {
+      await engine.flush(settleTimeoutMs)
+    }
+  })
 
   registerControlRoutes(app, engine)
 

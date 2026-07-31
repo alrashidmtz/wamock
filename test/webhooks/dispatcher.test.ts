@@ -100,8 +100,8 @@ describe('rule 2 — per-tenant signing', () => {
     await flush(h)
 
     const delivery = h.sent[0]!
-    expect(verifySignature('tenant-secret', delivery.body, delivery.signature)).toBe(true)
-    expect(verifySignature('platform-secret', delivery.body, delivery.signature)).toBe(false)
+    expect(verifySignature({ appSecret: 'tenant-secret', body: delivery.body, header: delivery.signature })).toBe(true)
+    expect(verifySignature({ appSecret: 'platform-secret', body: delivery.body, header: delivery.signature })).toBe(false)
   })
 })
 

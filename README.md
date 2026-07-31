@@ -112,6 +112,22 @@ Verify against `JSON.stringify(req.body)` and you'll pass every test, then fail
 the first time key order or whitespace differs. wamock signs exactly what it
 sends.
 
+The same helpers wamock signs with are exported, so your receiver can be tested
+against them directly:
+
+```ts
+import { verifySignature } from 'wamock'
+
+verifySignature({ appSecret, body: rawBody, header: signature })
+```
+
+Name the fields. The positional form — `verifySignature(appSecret, rawBody,
+signature)` — still works and is deprecated, because two adjacent strings have
+no safe order: `createHmac(alg, key)` puts the key first, most `sign(payload,
+secret)` helpers put it second, and getting it backwards used to return a
+well-formed `sha256=…` that simply never verified. wamock now refuses that call
+instead of handing you a signature to distrust your own HMAC check over.
+
 ---
 
 ## Use it as a library
@@ -144,12 +160,13 @@ await mock.reset()
 Time is virtual and frozen by default, so tests are deterministic — the same
 script produces the same message ids on every run.
 
-### Delivery statuses need the clock to move
+### Webhooks with a delay need the clock to move
 
-Meta sends `sent` and `delivered` as webhooks *after* the send, never as its
-response — and here they are due at a virtual instant that never arrives on its
-own, because the clock is frozen. Asserting right after `send()` finds nothing
-and reads like a broken mock rather than a stopped clock:
+A webhook due *later* is due at a virtual instant that never arrives on its own,
+because the clock is frozen. Delivery statuses are the case you meet first:
+Meta sends `sent` and `delivered` as webhooks after the send, never as its
+response, so asserting right after `send()` finds nothing and reads like a
+broken mock rather than a stopped clock:
 
 ```ts
 await mock.send({ to: CUSTOMER, text: 'hola' })
@@ -160,6 +177,11 @@ await mock.time.advance(60_000)   // now `sent` and `delivered` have arrived
 
 This is deliberate: real statuses do not arrive synchronously either, and a
 mock that delivered them instantly would hide every ordering bug.
+
+Anything with **no** delay of its own — an inbound message, a quality change, a
+template transition — arrives before the call that caused it returns, whether
+you made it through a helper or with `curl` against the control API. You never
+have to advance the clock to see those.
 
 ### Your app's clock is not wamock's clock
 

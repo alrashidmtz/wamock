@@ -37,11 +37,9 @@ const post = async (url: string, payload: unknown): Promise<LightMyRequestRespon
     payload: JSON.stringify(payload),
   })
 
-/** Open the window and drain the webhook that opened it. */
+/** Open the window and drop the webhook that opened it. */
 async function openWindow(): Promise<void> {
   await post('/__mock/inbound', { from: CUSTOMER, text: 'hola' })
-  engine.clock.advance(0)
-  await engine.settle()
   received.length = 0
 }
 
@@ -108,8 +106,6 @@ describe('POST /__mock/statuses', () => {
     received.length = 0
 
     const res = await post('/__mock/statuses', { id: wamid, status: 'read' })
-    engine.clock.advance(0)
-    await engine.settle()
 
     expect(res.statusCode).toBe(200)
     expect(statuses().map((s) => s.status)).toContain('read')
@@ -121,8 +117,6 @@ describe('POST /__mock/statuses', () => {
     received.length = 0
 
     await post('/__mock/statuses', { id: wamid, status: 'failed', error: 131026 })
-    engine.clock.advance(0)
-    await engine.settle()
 
     expect(statuses().find((s) => s.status === 'failed')?.errors?.[0]?.code).toBe(131026)
   })

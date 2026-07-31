@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import { buildStateSnapshot } from '../src/control/routes.js'
 import { WamockEngine } from '../src/core/engine.js'
 import { verifySignature } from '../src/webhooks/signature.js'
 import { createServer } from '../src/server.js'
@@ -126,7 +127,7 @@ describe('POST /__mock/inbound', () => {
     await engine.settle()
 
     const delivery = received[0]!
-    expect(verifySignature(SECRET, delivery.body, delivery.signature)).toBe(true)
+    expect(verifySignature({ appSecret: SECRET, body: delivery.body, header: delivery.signature })).toBe(true)
   })
 
   it('reports the sender without a + inside the webhook', async () => {
@@ -220,6 +221,36 @@ describe('GET /__mock/messages and /__mock/state', () => {
     // /__mock/state is meant to be curl-able and pasted into bug reports.
     const res = await get('/__mock/state')
     expect(JSON.stringify(res.json())).not.toContain(SECRET)
+  })
+
+  it('reports which apps a WABA is subscribed to, not an empty object', async () => {
+    // `subscribedApps` is a Set internally, and a Set serializes to `{}`. The
+    // seeded WABA arrives subscribed, so anything but its app id here means the
+    // readout is lying in exactly the report this endpoint exists to serve.
+    const res = await get('/__mock/state')
+
+    expect(res.json().wabas).toEqual([
+      {
+        wabaId: engine.state.defaultWabaId,
+        appId: engine.state.defaultAppId,
+        subscribedApps: [engine.state.defaultAppId],
+      },
+    ])
+  })
+
+  it('survives a JSON round trip unchanged', async () => {
+    // The guard for the whole class, not just for `subscribedApps`: a Set, a
+    // Map, a Date or an undefined value added to this payload later would all
+    // come back different, and the endpoint would quietly start lying again.
+    // Exercised against a populated graph, so every optional field is present.
+    await openWindow()
+    await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
+    await post('/__mock/quality', { quality_rating: 'RED' })
+    await post('/__mock/tier', { tier: 'TIER_1K' })
+
+    const snapshot = buildStateSnapshot(engine)
+
+    expect(JSON.parse(JSON.stringify(snapshot))).toEqual(snapshot)
   })
 })
 

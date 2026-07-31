@@ -56,6 +56,19 @@ export interface WamockEngineOptions {
 export type { SendMessageResponse } from '../graph/messaging-service.js'
 export type { TemplateCreateResponse } from '../graph/template-service.js'
 
+/**
+ * Long enough that any reasonable receiver finishes, short enough that a stuck
+ * one does not look like a frozen test suite.
+ */
+export const DEFAULT_SETTLE_TIMEOUT_MS = 5_000
+
+/**
+ * Bound on `flush()`'s rounds. Each round only repeats because the previous one
+ * delivered something, so reaching this means a receiver answers every webhook
+ * with another one — an infinite loop that would otherwise hang forever.
+ */
+const MAX_FLUSH_ROUNDS = 100
+
 export class WamockEngine {
   readonly clock: VirtualClock
   readonly state: MockState
@@ -71,6 +84,8 @@ export class WamockEngine {
   readonly #templates: TemplateService
   readonly #media: MediaService
   readonly #techProvider: TechProviderService
+  /** Set while `flush()` runs, so a re-entrant call cannot deadlock on itself. */
+  #flushing = false
 
   constructor(options: WamockEngineOptions) {
     this.clock = new VirtualClock({
@@ -124,6 +139,72 @@ export class WamockEngine {
   /** Await any webhook deliveries the last `advance()` kicked off. */
   async settle(): Promise<void> {
     await this.deliverer.settle()
+  }
+
+  /**
+   * `settle()`, but never longer than `timeoutMs`.
+   *
+   * Settling waits on the caller's own receiver, and a hung one must not be
+   * able to freeze a test suite or hold an HTTP request open. The timer is
+   * unref'd so this can never be the reason a process stays alive.
+   */
+  async settleWithin(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expiry = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs)
+      timer.unref?.()
+    })
+
+    try {
+      await Promise.race([this.settle(), expiry])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  /**
+   * Deliver everything already due, then wait for the receiver to take it.
+   *
+   * Webhooks with no delay of their own — an inbound message, a quality change,
+   * a template transition — are scheduled at the current instant, and a frozen
+   * clock never reaches an instant on its own. Without this they sat there
+   * until something moved time, which made `POST /__mock/quality` look like it
+   * had failed to announce anything (#4). Both front doors call it, so the
+   * library and the control API cannot answer differently.
+   *
+   * When frozen, rounds repeat while deliveries keep happening, so a handler
+   * that replies to a webhook has its reply delivered here too rather than in
+   * some later `advance()`.
+   *
+   * A live clock takes exactly one round. Its background tick already fires
+   * everything that comes due, so repeating would not be catching work nobody
+   * else will do — it would be counting unrelated concurrent deliveries as
+   * progress, and under steady traffic the loop never converges. Measured, not
+   * guessed: it hit the round cap and answered a valid control call with a 400.
+   */
+  async flush(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS): Promise<void> {
+    // A nested flush defers to the one already running. Handlers reply by
+    // calling back into the mock, which flushes again from inside the delivery
+    // the outer flush is awaiting; waiting here would deadlock both until the
+    // timeout. The round loop below picks their work up anyway.
+    if (this.#flushing) return
+    this.#flushing = true
+    try {
+      const maxRounds = this.clock.frozen ? MAX_FLUSH_ROUNDS : 1
+      for (let round = 0; round < maxRounds; round++) {
+        const before = this.deliverer.deliveredCount()
+        this.clock.advance(0)
+        await this.settleWithin(timeoutMs)
+        if (this.deliverer.deliveredCount() === before) return
+      }
+      if (this.clock.frozen) {
+        throw new Error(
+          `Webhook flush exceeded ${MAX_FLUSH_ROUNDS} rounds — a receiver is very likely answering every webhook with another one`,
+        )
+      }
+    } finally {
+      this.#flushing = false
+    }
   }
 
   reset(): void {
