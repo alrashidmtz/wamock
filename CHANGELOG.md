@@ -4,6 +4,29 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.3.1] — 2026-07-30
+
+**Fixed: the documented `docker run` command published a port that answered
+nothing.**
+
+`--host=0.0.0.0` lived in the image's `CMD`, and arguments after an image
+replace `CMD` rather than adding to it. So the one form the README documents —
+`docker run -p 4004:4004 ghcr.io/alrashidmtz/wamock --app-secret shhh` — dropped
+that flag, the server bound loopback *inside* the container, and `-p` published
+a port nothing was listening on. The Dockerfile's own comment called the flag
+"overridable", which is what it was meant to be and is not what `CMD` does.
+
+The flag moves to `ENTRYPOINT`, which arguments append to. The documented
+command now works unchanged, `--host` stays overridable because the parser takes
+the last occurrence, and the reachable-from-your-network warning still prints.
+
+The README was never wrong; the image did not do what the README said. Same
+class as the curl examples in 0.2.11, and hidden the same way: CI's smoke test
+spelled out `--port` and `--host` in full, so it exercised a form no reader was
+ever told to type. It now runs the documented command instead.
+
+Affects the container image only. The npm package is unchanged.
+
 ## [0.3.0] — 2026-07-30
 
 Three defects from field-testing a real integration against wamock (#3, #4,

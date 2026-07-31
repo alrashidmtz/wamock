@@ -47,10 +47,18 @@ EXPOSE 4004
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:4004/__mock/state').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-ENTRYPOINT ["node", "dist/cli.js", "start"]
 # --host=0.0.0.0 is required INSIDE a container: the CLI binds loopback by
 # default (the control API is unauthenticated), and loopback inside a container
 # is unreachable from the host even with -p. The container boundary is what
-# makes the wider binding acceptable here.
-# Overridable: `docker run wamock --app-secret shhh --webhook-url http://...`
-CMD ["--port=4004", "--host=0.0.0.0"]
+# makes the wider binding acceptable here, and the CLI still prints its
+# reachable-from-your-network warning.
+#
+# It belongs in ENTRYPOINT, not CMD. Arguments after the image REPLACE CMD
+# rather than adding to it, so with `CMD ["--host=0.0.0.0"]` the one documented
+# way to use this image — `docker run wamock --app-secret shhh` — dropped the
+# flag, bound loopback, and published a port that answered nothing. ENTRYPOINT
+# is appended to, so the same command now works, and `--host` stays
+# overridable because the parser takes the last occurrence.
+#
+# --port needs no entry here: 4004 is the CLI's own default.
+ENTRYPOINT ["node", "dist/cli.js", "start", "--host=0.0.0.0"]

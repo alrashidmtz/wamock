@@ -178,8 +178,15 @@ jobs:
         run: |
           TAG="$(echo "$IMAGE" | head -n1)"
           echo "smoke testing $TAG"
+          # Deliberately the form the README documents, not a fuller one that
+          # happens to work. Spelling out --host here is what hid the bug that
+          # shipped in 0.3.0: arguments after the image REPLACE CMD, so the
+          # documented `docker run wamock --app-secret shhh` dropped the
+          # --host=0.0.0.0 that lived there, bound loopback, and published a
+          # port that answered nothing. The smoke test passed the whole time
+          # because it never ran what the docs told people to run.
           docker run -d --name wamock-smoke -p 4004:4004 "$TAG" \
-            --port=4004 --host=0.0.0.0 --app-secret=smoke --quiet
+            --app-secret=smoke --quiet
 
           for i in $(seq 1 30); do
             if curl -sf http://127.0.0.1:4004/__mock/state >/dev/null; then break; fi
