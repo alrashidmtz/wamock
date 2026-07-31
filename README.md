@@ -457,13 +457,22 @@ docker run -p 4004:4004 ghcr.io/alrashidmtz/wamock:edge \
   --app-secret shhh --webhook-url http://host.docker.internal:3000/webhook
 ```
 
-Two tags: `:edge` tracks `main`, and `:latest` / `:x.y.z` appear once a version
-is released. Images are `linux/amd64` and `linux/arm64`, and each one is
-smoke-tested in CI — pulled, started, and driven through a full message
-lifecycle — before it is considered published.
+Two tags: `:latest` / `:x.y.z` are published from a version tag, and `:edge` is
+rebuilt from `main` on demand — so it is only as current as the last manual run,
+never automatically ahead of the newest release.
 
-The image already passes `--host 0.0.0.0`, which it needs to be reachable
-through `-p`. See `examples/docker-compose` for a CI-shaped setup.
+Both images are `linux/amd64` and `linux/arm64`, and both are smoke-tested by
+pulling back what was just pushed and running it — the amd64 one through a full
+message lifecycle, ending in the `131047` a closed 24h window should produce;
+the arm64 one booted under emulation and checked that it reports its
+architecture and accepts an inbound, because QEMU is too slow to be worth more
+than that. The push happens first, so a failing smoke test fails the release
+loudly rather than un-publishing anything: check that the release run is green
+before trusting a tag.
+
+The image passes `--host 0.0.0.0` from its `ENTRYPOINT`, which it needs to be
+reachable through `-p`, and your own arguments are added to it rather than
+replacing it. See `examples/docker-compose` for a CI-shaped setup.
 
 ---
 
