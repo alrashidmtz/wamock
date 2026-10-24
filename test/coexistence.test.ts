@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { WamockEngine } from '../src/core/engine.js'
+import type { CoexistenceSeed } from '../src/graph/coexistence-service.js'
 import { GraphError } from '../src/errors/graph-error.js'
 import { createServer } from '../src/server.js'
 
@@ -20,7 +21,7 @@ const HOUR = 60 * 60 * 1000
 const DAY = 24 * HOUR
 const CUSTOMER = '5215555000001'
 
-function harness(signup: Parameters<WamockEngine['createSignup']>[0] = {}) {
+function harness(signup: CoexistenceSeed = {}) {
   const bodies: string[] = []
   const e = new WamockEngine({
     appSecret: 's',

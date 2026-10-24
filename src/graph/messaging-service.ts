@@ -1,11 +1,12 @@
 import type { MockContext } from '../core/context.js'
+import { isAuthInternational } from '../core/pricing.js'
 import type { EntryPointWindow, PricingCategory } from '../core/pricing.js'
 import { assertToken, requirePhoneNumber } from '../core/guards.js'
 import { userIdentity } from '../core/identity.js'
 import { makeWamid } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
-import { normalizeWaId, toWebhookDisplayNumber } from '../core/phone.js'
-import { isRecord, isWebUrl } from '../core/values.js'
+import { countryOf, normalizeWaId, toWebhookDisplayNumber } from '../core/phone.js'
+import { isRecord, isWebUrl, textOf } from '../core/values.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import {
   buildInboundPayload,
@@ -14,6 +15,8 @@ import {
 } from '../webhooks/payloads.js'
 import type { InboundContent, MessageStatus, UserIdentity } from '../webhooks/payloads.js'
 import { validateInteractive } from './interactive.js'
+import type { BlockService } from './block-service.js'
+import { isRegistered } from './registration-service.js'
 import type { CoexistenceService } from './coexistence-service.js'
 import { MIME_TYPES_BY_KIND } from './media-service.js'
 import type { MediaService } from './media-service.js'
@@ -116,17 +119,21 @@ export class MessagingService {
   readonly #coexistence: CoexistenceService
   /** A send by media `id` needs the media to exist. */
   readonly #media: MediaService
+  /** A blocked customer neither receives nor reaches the business. */
+  readonly #blocks: BlockService
 
   constructor(
     context: MockContext,
     templates: TemplateService,
     coexistence: CoexistenceService,
     media: MediaService,
+    blocks: BlockService,
   ) {
     this.#context = context
     this.#templates = templates
     this.#coexistence = coexistence
     this.#media = media
+    this.#blocks = blocks
   }
 
   /** `POST /{version}/{phone_number_id}/messages`. */
@@ -139,6 +146,13 @@ export class MessagingService {
 
     assertToken(this.#context, accessToken)
     const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId)
+    // Embedded Signup verifies a number but leaves registering it to the
+    // partner: until `register`, every send fails, as with Meta.
+    if (!isRegistered(phoneNumber)) {
+      throw new GraphError(ERROR_CODES.NOT_REGISTERED, {
+        details: `Register ${phoneNumberId} (POST /{phone_number_id}/register) before sending from it`,
+      })
+    }
 
     const { type, rawTo, recipient } = this.#validateEnvelope(body)
     this.#validateTypePayload(type, body)
@@ -195,8 +209,18 @@ export class MessagingService {
     // Marketing to a user who tapped "Stop" is accepted, then fails on its
     // status with 131050. It is not delivered, so it is not billed.
     const stopped = category === 'marketing' && users.marketingStopped(phoneNumberId, waId)
-    // Media Meta could not use fails the same way, on the status, with 131053.
-    const failureCode = stopped ? MARKETING_OPTED_OUT : mediaUnusable ? MEDIA_UNUSABLE : undefined
+    // Media Meta could not use fails the same way, on the status, with 131053,
+    // and so does a message to a customer the business blocked, with 130403
+    // (accepted first, as integrators report it; Meta's page says only that
+    // it "returns an error").
+    const blocked = this.#blocks.isBlocked(phoneNumberId, waId)
+    const failureCode = blocked
+      ? ERROR_CODES.BLOCKED_USER
+      : stopped
+        ? MARKETING_OPTED_OUT
+        : mediaUnusable
+          ? MEDIA_UNUSABLE
+          : undefined
 
     // Priced once, at acceptance, whether or not its webhooks get through: a
     // dropped webhook does not refund the message or its free-tier slot.
@@ -218,7 +242,8 @@ export class MessagingService {
     if (sentTo === 'phone') users.recordPhoneContact(phoneNumberId, waId, clock.now())
 
     const wamid = makeWamid(phoneNumberId, state.nextSeq())
-    const { messaging_product: _mp, to: _to, recipient: _r, type: _t, ...rest } = body
+    // The token rides in the body of a form post; it is not message content.
+    const { messaging_product: _mp, to: _to, recipient: _r, type: _t, access_token: _token, ...rest } = body
     const opaque = body['biz_opaque_callback_data'] as string | undefined
 
     state.recordOutbound({
@@ -237,10 +262,11 @@ export class MessagingService {
     // the webhooks never arrive. Silent, and the expensive one in production.
     if (!scenario.shouldDropWebhook()) {
       const user = this.#identity(phoneNumberId, waId)
-      if (type === 'reaction') {
+      // A reaction to a blocked customer fails like any other message to one.
+      if (type === 'reaction' && failureCode === undefined) {
         this.#scheduleReactionStatus(phoneNumberId, wamid, waId, user, sentTo, body['reaction'], opaque)
       } else if (pricing) {
-        this.#scheduleStatuses(phoneNumberId, wamid, user, sentTo, pricing, entryPoint?.window, opaque)
+        this.#scheduleStatuses(phoneNumberId, wamid, user, sentTo, pricing, entryPoint?.window, opaque, businessId)
       } else {
         const at = clock.now() + STATUS_DELAYS.sent + scenario.latency()
         dispatcher.dispatchStatus(phoneNumberId, {
@@ -284,6 +310,22 @@ export class MessagingService {
     if (!waId) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
         details: `'${options.from}' is not a valid phone number`,
+      })
+    }
+
+    // A number not on Cloud API has nothing to deliver its messages to.
+    if (!isRegistered(phoneNumber)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `${phoneNumberId} is not registered on Cloud API, so no message reaches it there`,
+      })
+    }
+
+    // "The user cannot contact your business": nothing arrives from a
+    // customer the number blocked. Refused rather than dropped, so a test
+    // cannot believe it delivered a message Meta never would.
+    if (this.#blocks.isBlocked(phoneNumberId, waId)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `${waId} is blocked by ${phoneNumberId}; Meta delivers nothing from a blocked user`,
       })
     }
 
@@ -612,6 +654,19 @@ export class MessagingService {
 
   // --- internals ----------------------------------------------------------
 
+  /**
+   * An authentication template may be billed the authentication-international
+   * rate. Meta applies it to messages "delivered on or after" the start time,
+   * so it is judged at the instant this one's `delivered` goes out, latency
+   * and reordering included. Only the category changes: no counter tracks
+   * authentication messages, so nothing is billed twice.
+   */
+  #billedAt(pricing: Record<string, unknown>, businessId: string | undefined, waId: string, deliveredAt: number): Record<string, unknown> {
+    if (pricing['category'] !== 'authentication' || businessId === undefined) return pricing
+    const business = this.#context.state.business(businessId)
+    return isAuthInternational(business, countryOf(waId), deliveredAt) ? { ...pricing, category: 'authentication_international' } : pricing
+  }
+
   #validateEnvelope(body: Record<string, unknown>): {
     type: string
     rawTo?: string
@@ -720,7 +775,7 @@ export class MessagingService {
     if (MEDIA_TYPES[type] && isRecord(content)) found.push({ where: type, kind: type, media: content })
     if (type === 'interactive' && isRecord(content) && isRecord(content['header'])) {
       const header = content['header']
-      const kind = String(header['type'])
+      const kind = textOf(header['type'])
       if (kind in MEDIA_TYPES && isRecord(header[kind])) {
         found.push({ where: `interactive[header][${kind}]`, kind, media: header[kind] })
       }
@@ -730,7 +785,7 @@ export class MessagingService {
         if (!isRecord(component) || !Array.isArray(component['parameters'])) continue
         for (const parameter of component['parameters'] as unknown[]) {
           if (!isRecord(parameter)) continue
-          const kind = String(parameter['type'])
+          const kind = textOf(parameter['type'])
           if (kind in MEDIA_TYPES && isRecord(parameter[kind])) {
             found.push({ where: `template parameter ${kind}`, kind, media: parameter[kind] })
           }
@@ -854,6 +909,7 @@ export class MessagingService {
     pricing: Record<string, unknown>,
     entryPoint?: EntryPointWindow,
     bizOpaqueCallbackData?: string,
+    businessId?: string,
   ): void {
     const { clock, scenario, dispatcher } = this.#context
 
@@ -883,7 +939,7 @@ export class MessagingService {
         // as in Meta's v24.0 example; a receiver must not assume which. No
         // `conversation` object: v24.0+ omits it outside free entry point
         // windows, which wamock does not open.
-        ...(status === 'delivered' ? { pricing } : {}),
+        ...(status === 'delivered' ? { pricing: this.#billedAt(pricing, businessId, user.waId, at) } : {}),
         ...(bizOpaqueCallbackData !== undefined ? { bizOpaqueCallbackData } : {}),
         // Inside a free entry point window the conversation object is back,
         // on `sent` and on `delivered`; its expiration rides on `sent` only.

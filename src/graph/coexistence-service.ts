@@ -85,6 +85,15 @@ export class CoexistenceService {
     this.#context = context
   }
 
+  /**
+   * Refuse a seed with a phone that is not one, before Embedded Signup mints
+   * anything: a refused signup must leave no tenant and send no webhook.
+   */
+  assertSeed(seed: CoexistenceSeed): void {
+    for (const contact of seed.contacts ?? []) this.#waId(contact.phone)
+    for (const thread of seed.history ?? []) this.#waId(thread.phone)
+  }
+
   /** Called by Embedded Signup for a Business app number. */
   onboard(phoneNumberId: string, seed: CoexistenceSeed = {}): void {
     const { clock } = this.#context

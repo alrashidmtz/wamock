@@ -229,6 +229,11 @@ export interface Wamock {
    * indicator. Kept apart from `messages()`: reading a message sends nothing.
    */
   readReceipts(): ReadReceipt[]
+  /**
+   * The code the last `request_code` sent to a number, as its SMS would read
+   * it, to pass to `verify_code`. Undefined when none was requested.
+   */
+  verificationCode(phoneNumberId: string): string | undefined
   expectSent(criteria: ExpectSentCriteria): OutboundMessage
   scenario(config: Partial<ScenarioConfig>): void
 
@@ -379,6 +384,8 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 
     messages: () => engine.state.outbound(),
     readReceipts: () => engine.state.readReceipts(),
+
+    verificationCode: (phoneNumberId) => engine.verificationCode(phoneNumberId),
 
     expectSent(criteria) {
       const sent = engine.state.outbound()

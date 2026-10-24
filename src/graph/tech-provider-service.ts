@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
 import { requirePhoneNumber, requireWaba } from '../core/guards.js'
+import { freshId } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
 import { callingCodeOf, countryOf, toGraphDisplayNumber } from '../core/phone.js'
 import type { DebugTokenData, TokenKind } from '../core/tokens.js'
@@ -10,7 +11,7 @@ import { isWebUrl } from '../core/values.js'
 import { pageOf } from './paging.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 import type { CoexistenceSeed, CoexistenceService } from './coexistence-service.js'
-import { buildAccountUpdatePayload } from '../webhooks/coexistence-payloads.js'
+import { buildAccountUpdatePayload, buildAuthInternationalPayload } from '../webhooks/coexistence-payloads.js'
 import { buildBusinessCapabilityPayload } from '../webhooks/tech-payloads.js'
 
 /**
@@ -22,19 +23,6 @@ import { buildBusinessCapabilityPayload } from '../webhooks/tech-payloads.js'
  * rather than loud: a token that expires two hours after connect, a WABA that
  * was never subscribed and therefore delivers nothing at all.
  */
-
-/**
- * `base`, or `base_2`, `base_3`… if something already claimed it. A generated
- * id must never land on one a test registered by hand: registering it again
- * would overwrite that WABA or number, and a shared portfolio id would make
- * the tenant share someone else's messaging limit.
- */
-function freshId(base: string, taken: (id: string) => boolean): string {
-  if (!taken(base)) return base
-  let n = 2
-  while (taken(`${base}_${n}`)) n++
-  return `${base}_${n}`
-}
 
 export interface PhoneNumberListOptions {
   fields?: string[]
@@ -49,13 +37,28 @@ export interface PhoneNumberListOptions {
   version?: string
 }
 
+/** "We will set your start times 30 days out" once a portfolio is eligible. */
+const ELIGIBILITY_NOTICE_MS = 30 * 24 * 60 * 60 * 1000
+
 /** Meta's limit on `override_callback_uri`, for a WABA and for a number. */
 const CALLBACK_URI_MAX = 200
 
 
+/** How a customer finished Embedded Signup, and what a test skips. */
+export interface SignupOptions {
+  /** Subscribe the app to the WABA, a step of its own with Meta. */
+  subscribed?: boolean
+  businessId?: string
+  coexistence?: boolean
+  /** The number the customer finished with: verified (default), unverified, or none. */
+  phone?: 'verified' | 'unverified' | 'none'
+  /** Register a verified number, a step of its own with Meta. */
+  registered?: boolean
+}
+
 interface SignupCode {
   wabaId: string
-  phoneNumberId: string
+  phoneNumberId?: string
   used: boolean
 }
 
@@ -87,17 +90,35 @@ export class TechProviderService {
    * Business app, with whatever contacts and history the app holds.
    */
   createSignup(
-    options: { subscribed?: boolean; businessId?: string; coexistence?: boolean } & CoexistenceSeed = {},
+    options: SignupOptions & CoexistenceSeed = {},
   ): {
     code: string
-    phone_number_id: string
+    phone_number_id?: string
     waba_id: string
   } {
     const { state } = this.#context
+    // Checked before anything is minted: a refused signup leaves no tenant.
+    if (options.coexistence === true && options.phone !== undefined && options.phone !== 'verified') {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'A Business app number is already verified: coexistence takes no phone option' })
+    }
+    if (options.coexistence === true) this.#coexistence.assertSeed(options)
+    // Every id settled before anything is inserted, or even counted: one that clashes is
+    // refused while the state is still untouched. A portfolio named by the
+    // caller may already exist (the signup joins it), but not as something else.
+    const requested = options.businessId
+    if (requested !== undefined && !state.business(requested) && state.isIdTaken(requested)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: `Id ${requested} belongs to another kind of object` })
+    }
     const seq = state.nextSeq()
-    const wabaId = freshId(`WABA_TENANT_${seq}`, (id) => !!state.waba(id))
-    const phoneNumberId = freshId(`PNID_TENANT_${seq}`, (id) => !!state.phoneNumber(id))
-    const businessId = options.businessId ?? freshId(`BUSINESS_TENANT_${seq}`, (id) => !!state.business(id))
+    const claimed = new Set(requested !== undefined ? [requested] : [])
+    const mint = (base: string) => {
+      const id = freshId(base, (candidate) => claimed.has(candidate) || state.isIdTaken(candidate))
+      claimed.add(id)
+      return id
+    }
+    const wabaId = mint(`WABA_TENANT_${seq}`)
+    const phoneNumberId = mint(`PNID_TENANT_${seq}`)
+    const businessId = requested ?? mint(`BUSINESS_TENANT_${seq}`)
     if (!state.business(businessId)) state.registerBusiness(businessId)
 
     state.registerWaba({
@@ -106,16 +127,26 @@ export class TechProviderService {
       businessId,
       subscribedApps: options.subscribed === true ? new Set([state.defaultAppId]) : new Set(),
     })
-    state.registerPhoneNumber({
-      phoneNumberId,
-      wabaId,
-      displayPhoneNumber: `1555000${String(seq).padStart(4, '0')}`,
-    })
+    // Since Embedded Signup v3 a customer can finish with a verified number,
+    // an unverified one, or none (Meta's changelog). Signup verifies a number
+    // but never registers it: that step is the partner's, except for a
+    // Business app number, which is already on WhatsApp.
+    const phone = options.coexistence === true ? 'verified' : (options.phone ?? 'verified')
+    if (phone !== 'none') {
+      const verified = phone === 'verified'
+      state.registerPhoneNumber({
+        phoneNumberId,
+        wabaId,
+        displayPhoneNumber: `1555000${String(seq).padStart(4, '0')}`,
+        ...(verified ? {} : { verification: 'UNVERIFIED' as const }),
+        registered: options.coexistence === true || (verified && options.registered === true),
+      })
+    }
 
     // Derived from the counter, not drawn at random: two identical runs must
     // mint identical codes, like every other id in wamock.
     const code = `AQD${createHash('sha256').update(`signup:${seq}`).digest('base64url').slice(0, 22)}`
-    this.#signupCodes.set(code, { wabaId, phoneNumberId, used: false })
+    this.#signupCodes.set(code, { wabaId, ...(phone !== 'none' ? { phoneNumberId } : {}), used: false })
 
     // "Triggered whenever a customer successfully completes the Embedded
     // Signup flow": the partner learns of the new customer here, and for a
@@ -137,7 +168,7 @@ export class TechProviderService {
         ...(options.history !== undefined ? { history: options.history } : {}),
       })
     }
-    return { code, phone_number_id: phoneNumberId, waba_id: wabaId }
+    return { code, ...(phone !== 'none' ? { phone_number_id: phoneNumberId } : {}), waba_id: wabaId }
   }
 
   /** `GET /{version}/oauth/access_token` — trade a signup code for a token. */
@@ -256,7 +287,8 @@ export class TechProviderService {
     body: Record<string, unknown>,
   ): { url: string; verifyToken: string } | null {
     const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
-    const others = Object.keys(body).filter((key) => key !== 'webhook_configuration')
+    // `access_token` is the call's authentication, read by the server, not a setting.
+    const others = Object.keys(body).filter((key) => key !== 'webhook_configuration' && key !== 'access_token')
     if (others.length > 0) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
         details: `wamock emulates only webhook_configuration on POST /{phone_number_id}, not ${others.join(', ')}`,
@@ -364,6 +396,76 @@ export class TechProviderService {
     }
   }
 
+  /**
+   * Control API: Meta deems a portfolio eligible for authentication-
+   * international rates (in production, past 750K such messages in 30 days).
+   * The start time is 30 days out unless given, as Meta sets it, and every
+   * WABA of the portfolio hears of it, and of the primary location if set.
+   */
+  setAuthInternational(
+    businessId: string,
+    options: { startTime?: number; exceptions?: Array<{ country: string; startTime: number }>; primaryLocation?: string },
+  ): { success: true } {
+    const { state, clock, dispatcher } = this.#context
+    if (!state.business(businessId)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: `Unknown business portfolio ${businessId}` })
+    }
+    const eligibility = {
+      startTime: options.startTime ?? clock.now() + ELIGIBILITY_NOTICE_MS,
+      exceptions: options.exceptions ?? [],
+    }
+    state.updateBusiness(businessId, {
+      authInternational: eligibility,
+      ...(options.primaryLocation !== undefined ? { primaryLocation: options.primaryLocation } : {}),
+    })
+    for (const waba of state.wabas().filter((w) => w.businessId === businessId)) {
+      dispatcher.dispatchToWaba(
+        waba.wabaId,
+        buildAuthInternationalPayload({ wabaId: waba.wabaId, timeMs: clock.now(), event: 'AUTH_INTL_PRICE_ELIGIBILITY_UPDATE', ...eligibility }),
+      )
+      if (options.primaryLocation !== undefined) {
+        dispatcher.dispatchToWaba(
+          waba.wabaId,
+          buildAuthInternationalPayload({
+            wabaId: waba.wabaId,
+            timeMs: clock.now(),
+            event: 'BUSINESS_PRIMARY_LOCATION_COUNTRY_UPDATE',
+            country: options.primaryLocation,
+          }),
+        )
+      }
+    }
+    return { success: true }
+  }
+
+  /**
+   * `GET /{version}/{waba_id}?fields=…`: `id`, and of the fields Meta's
+   * authentication-international page reads here, each one that is set.
+   */
+  getWabaFields(wabaId: string, fields: string[]): Record<string, unknown> {
+    const { state } = this.#context
+    const waba = requireWaba(this.#context, wabaId, 'get')
+    const business = state.business(waba.businessId)
+    const eligibility = business?.authInternational
+    const available: Record<string, unknown> = {
+      ...(eligibility
+        ? {
+            auth_international_rate_eligibility: {
+              start_time: Math.floor(eligibility.startTime / 1000),
+              exception_countries: eligibility.exceptions.map((exception) => ({
+                country_code: exception.country,
+                start_time: Math.floor(exception.startTime / 1000),
+              })),
+            },
+          }
+        : {}),
+      ...(business?.primaryLocation !== undefined ? { primary_business_location: business.primaryLocation } : {}),
+    }
+    const result: Record<string, unknown> = { id: wabaId }
+    for (const field of fields) if (field in available) result[field] = available[field]
+    return result
+  }
+
   /** `GET /{version}/{phone_number_id}?fields=…`. Only requested fields come back. */
   getPhoneNumberFields(phoneNumberId: string, fields: string[]): Record<string, unknown> {
     const phoneNumber = this.#context.state.phoneNumber(phoneNumberId)
@@ -375,7 +477,7 @@ export class TechProviderService {
     // live number on the Cloud API.
     const available: Record<string, unknown> = {
       display_phone_number: toGraphDisplayNumber(phoneNumber.displayPhoneNumber),
-      verified_name: 'wamock Test Business',
+      verified_name: phoneNumber.verifiedName ?? 'wamock Test Business',
       quality_rating: phoneNumber.qualityRating ?? 'GREEN',
       status: 'CONNECTED',
       name_status: 'APPROVED',
@@ -391,7 +493,7 @@ export class TechProviderService {
       // that Meta still answers. Both read the same value.
       whatsapp_business_manager_messaging_limit: limit,
       messaging_limit_tier: limit,
-      code_verification_status: 'VERIFIED',
+      code_verification_status: phoneNumber.verification ?? 'VERIFIED',
       platform_type: 'CLOUD_API',
       is_on_biz_app: this.#coexistence.isOnBizApp(phoneNumberId),
       // Where this number's webhooks can go, each key only when set: its own

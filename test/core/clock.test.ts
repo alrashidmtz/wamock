@@ -121,6 +121,15 @@ describe('VirtualClock — live mode', () => {
     expect(clock.now()).toBeGreaterThan(before)
   })
 
+  it('takes only a finite duration: NaN would leave the clock at NaN for good', () => {
+    const clock = new VirtualClock({ mode: 'frozen', start: 1_750_000_000_000 })
+    const fn = vi.fn()
+    clock.at(1_750_000_000_000 + 86_400_000, fn)
+    for (const ms of [Number.NaN, Number.POSITIVE_INFINITY]) expect(() => clock.advance(ms)).toThrow(RangeError)
+    expect(clock.now()).toBe(1_750_000_000_000)
+    expect(fn).not.toHaveBeenCalled()
+  })
+
   it('applies advance() as an offset on top of wall time', () => {
     const clock = new VirtualClock({ mode: 'live' })
     const before = clock.now()

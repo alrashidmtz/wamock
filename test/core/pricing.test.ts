@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { FREE_SERVICE_MESSAGES_PER_MONTH, Pricing } from '../../src/core/pricing.js'
+import { FREE_SERVICE_MESSAGES_PER_MONTH, isAuthInternational, Pricing } from '../../src/core/pricing.js'
 
 const OCT_2026 = Date.UTC(2026, 9, 15)
 const NOV_2026 = Date.UTC(2026, 10, 1)
@@ -80,5 +80,26 @@ describe('Pricing — per message, not per conversation', () => {
     for (let i = 0; i < FREE_SERVICE_MESSAGES_PER_MONTH; i++) p.price(PNID, 'service', OCT_2026)
     p.clear()
     expect(p.price(PNID, 'service', OCT_2026)['type']).toBe('free_customer_service')
+  })
+})
+
+// Not pinned: a reply 24h+ after the ad, inside a window a later plain
+// message renewed. Meta says "respond within the customer service window"
+// without saying whether a renewed window still counts.
+describe('free entry point windows', () => {
+  it('give every window its own id', () => {
+    const p = new Pricing()
+    const service = { open: true, windowMs: 24 * 60 * 60 * 1000 }
+    for (const waId of ['5215555000001', '5215555000002']) p.noteAdEntry(PNID, waId, OCT_2026)
+    const first = p.entryPoint(PNID, '5215555000001', OCT_2026, service)
+    const second = p.entryPoint(PNID, '5215555000002', OCT_2026, service)
+    expect(first?.window.id).toEqual(expect.any(String))
+    expect(second?.window.id).not.toBe(first?.window.id)
+  })
+})
+
+describe('isAuthInternational', () => {
+  it('bills the authentication rate when the number’s business is unknown', () => {
+    expect(isAuthInternational(undefined, 'IN', OCT_2026)).toBe(false)
   })
 })

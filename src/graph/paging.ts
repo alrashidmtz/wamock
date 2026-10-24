@@ -1,6 +1,6 @@
 /** Opaque, like Meta's cursors; wamock's just encode the record id. */
 export const toCursor = (id: string): string => Buffer.from(id).toString('base64url')
-const fromCursor = (cursor: string): string => Buffer.from(cursor, 'base64url').toString()
+export const fromCursor = (cursor: string): string => Buffer.from(cursor, 'base64url').toString()
 
 export interface PageOptions {
   limit?: number

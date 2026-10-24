@@ -265,6 +265,13 @@ describe('documented send rules', () => {
     expect(e.state.outbound()).toHaveLength(1)
   })
 
+  it('keeps an access_token sent in the body out of the recorded message', () => {
+    const e = engine()
+    openWindow(e)
+    e.sendMessage(e.state.defaultPhoneNumberId, text('hi', { access_token: 'EAAsecret' }))
+    expect(JSON.stringify(e.state.outbound())).not.toContain('EAAsecret')
+  })
+
   it('leaves biz_opaque_callback_data off when the send had none', async () => {
     const e = engine()
     openWindow(e)

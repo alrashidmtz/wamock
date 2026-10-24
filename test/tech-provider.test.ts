@@ -257,7 +257,7 @@ describe('§9.6.3 — a WABA that was never subscribed', () => {
     // The documented integration failure: the number connects, the dashboard
     // looks right, and inbound messages never arrive. There is no error
     // anywhere — just silence.
-    const signup = (await post('/__mock/embedded-signup', { subscribed: false })).json()
+    const signup = (await post('/__mock/embedded-signup', { subscribed: false, registered: true })).json()
 
     // Only the partner's own account_update (PARTNER_ADDED) gets through.
     const messages = () => inbox.filter((d) => JSON.parse(d.body).entry[0].changes[0].field === 'messages')
@@ -291,7 +291,8 @@ describe('§9.6.3 — a WABA that was never subscribed', () => {
       headers: { authorization: `Bearer ${token}` },
     })
 
-    expect(res.statusCode).toBe(400)
+    expect(res.statusCode).toBe(403)
+    expect(res.json().error.code).toBe(200)
     expect(res.json().error.error_data.details).toMatch(/whatsapp_business_management/)
   })
 
@@ -537,7 +538,7 @@ describe('messaging limits', () => {
   it('shares one cap across every number in the business portfolio', async () => {
     // Set at portfolio level since 2025-10-08: one busy number can consume
     // the whole portfolio's capacity and block its siblings.
-    const signup = engine.createSignup({ businessId: engine.state.businessIdOf(engine.state.defaultPhoneNumberId)! })
+    const signup = engine.createSignup({ businessId: engine.state.businessIdOf(engine.state.defaultPhoneNumberId)!, registered: true })
     approve()
     approve(signup.waba_id)
     await post('/__mock/tier', { tier: 'TIER_1' })
@@ -552,12 +553,12 @@ describe('messaging limits', () => {
     approve()
     await post('/__mock/tier', { tier: 'TIER_1' })
     const signup = (
-      await post('/__mock/embedded-signup', { business_id: engine.state.defaultBusinessId })
+      await post('/__mock/embedded-signup', { business_id: engine.state.defaultBusinessId, registered: true })
     ).json()
     approve(signup.waba_id)
 
     expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
-    expect((await sendTemplate('5215555000002', signup.phone_number_id)).statusCode).toBe(400)
+    expect((await sendTemplate('5215555000002', signup.phone_number_id)).json().error.code).toBe(131048)
   })
 
   it('never drops a generated tenant into a portfolio someone named on purpose', async () => {
@@ -588,7 +589,7 @@ describe('messaging limits', () => {
   })
 
   it('keeps separate caps for separate portfolios', async () => {
-    const signup = engine.createSignup()
+    const signup = engine.createSignup({ registered: true })
     approve()
     approve(signup.waba_id)
     await post('/__mock/tier', { tier: 'TIER_1' })
@@ -669,7 +670,7 @@ describe('messaging limits', () => {
 // --- §9.6.1 The happy path -------------------------------------------------
 
 describe('§9.6.1 — onboarding, end to end', () => {
-  it('walks signup → exchange → subscribe → template → approval → first send', async () => {
+  it('walks signup → exchange → subscribe → template → approval → register → first send', async () => {
     const signup = (await post('/__mock/embedded-signup', { subscribed: false })).json()
 
     const token = (
@@ -705,8 +706,22 @@ describe('§9.6.1 — onboarding, end to end', () => {
       type: 'template',
       template: { name: 'bienvenida', language: { code: 'es_MX' }, components: [] },
     })
-    expect(sent.statusCode).toBe(200)
-    expect(sent.json().messages[0].id).toMatch(/^wamid\./)
+    expect(sent.statusCode).toBe(400)
+    // Signup verified the number; registering it is the partner's step, and
+    // until then every send fails, as with Meta.
+    expect(sent.json().error.code).toBe(133010)
+    expect((await post(`/v19.0/${signup.phone_number_id}/register`, { messaging_product: 'whatsapp', pin: '123456' })).json()).toEqual({
+      success: true,
+    })
+
+    const resent = await post(`/v19.0/${signup.phone_number_id}/messages`, {
+      messaging_product: 'whatsapp',
+      to: CUSTOMER,
+      type: 'template',
+      template: { name: 'bienvenida', language: { code: 'es_MX' }, components: [] },
+    })
+    expect(resent.statusCode).toBe(200)
+    expect(resent.json().messages[0].id).toMatch(/^wamid\./)
   })
 })
 

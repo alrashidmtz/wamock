@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { makeFbtraceId, makeMediaId, makeWamid } from '../../src/core/ids.js'
+import { freshId, makeFbtraceId, makeMediaId, makeWamid } from '../../src/core/ids.js'
 
 describe('makeWamid', () => {
   it('produces an id with the wamid. prefix Meta uses', () => {
@@ -40,5 +40,17 @@ describe('makeMediaId', () => {
   it('is deterministic and numeric-looking, like Meta media ids', () => {
     expect(makeMediaId(5)).toBe(makeMediaId(5))
     expect(makeMediaId(5)).toMatch(/^\d+$/)
+  })
+
+})
+
+describe('freshId', () => {
+  it('keeps the base when nothing holds it', () => {
+    expect(freshId('PNID_7', () => false)).toBe('PNID_7')
+  })
+
+  it('counts up past every suffix already held', () => {
+    const held = new Set(['PNID_7', 'PNID_7_2', 'PNID_7_3'])
+    expect(freshId('PNID_7', (id) => held.has(id))).toBe('PNID_7_4')
   })
 })

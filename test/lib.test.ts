@@ -81,6 +81,24 @@ describe('createWamock — the quickstart shape', () => {
     expect(messages[2]!['revoke']).toEqual({ original_message_id: messageId })
   })
 
+  it('hands out Meta’s own URLs through the interceptor, which routes them back', async () => {
+    // A client that only allows Meta's hosts (an SSRF guard on media
+    // downloads) must accept what wamock answers, as it accepts Meta's.
+    mock = await createWamock({ appSecret: 's', interceptGraph: true })
+    await mock.inbound({ from: '5216691112233', image: { bytes: Buffer.from('png bytes'), mime_type: 'image/png' } })
+    const mediaId = JSON.stringify(mock.engine.deliverer.log().at(-1)!.payload).match(/"id":"(\d+)"/)![1]!
+    const media = (await (await fetch(`https://graph.facebook.com/v23.0/${mediaId}`, { headers: { Authorization: 'Bearer T' } })).json()) as { url: string }
+    expect(new URL(media.url).host).toBe('lookaside.fbsbx.com')
+    const download = await fetch(new Request(media.url, { headers: { Authorization: 'Bearer T' } }))
+    expect(Buffer.from(await download.arrayBuffer()).toString()).toBe('png bytes')
+
+    mock.engine.state.registerPhoneNumber({ phoneNumberId: 'PNID_SECOND', wabaId: mock.wabaId, displayPhoneNumber: '15550002222' })
+    const page = (await (await fetch(`https://graph.facebook.com/v26.0/${mock.wabaId}/phone_numbers?limit=1`)).json()) as { paging: { next: string } }
+    const next = new URL(page.paging.next)
+    expect(next.host).toBe('graph.facebook.com')
+    expect(((await (await fetch(next)).json()) as { data: unknown[] }).data).toHaveLength(1)
+  })
+
   it('exposes a baseUrl an app can be pointed at', async () => {
     mock = await createWamock({ appSecret: 's' })
     expect(mock.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/)

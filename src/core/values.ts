@@ -14,3 +14,10 @@ export function isWebUrl(value: string): boolean {
 /** A plain object: not null, not an array. */
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
+
+/**
+ * A request value as text, when it is text. `String(value)` runs the value's
+ * own `toString`, and a JSON body can set that to null (`{"toString": null}`),
+ * which throws: request input must never get the chance to.
+ */
+export const textOf = (value: unknown): string => (typeof value === 'string' ? value : '')

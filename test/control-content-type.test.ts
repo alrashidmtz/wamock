@@ -1,3 +1,5 @@
+import { request as httpRequest } from 'node:http'
+
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { WamockEngine } from '../src/core/engine.js'
@@ -173,5 +175,83 @@ describe('control API accepts a JSON body whatever curl labels it', () => {
     })
 
     expect(res.statusCode).toBe(200)
+  })
+})
+
+describe('a multipart content type on the control API', () => {
+  it('is read as JSON like every other one', async () => {
+    const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: 1_750_000_000_000 })
+    const app = createServer(engine)
+    await app.ready()
+    try {
+      const res = await app.inject({
+        method: 'POST',
+        url: '/__mock/scenario',
+        headers: { 'content-type': 'multipart/form-data; boundary=x' },
+        payload: '{"seed":2}',
+      })
+      expect(res.statusCode).toBe(200)
+
+      // Under the control API's own limit, not the one media uploads get.
+      const huge = await app.inject({
+        method: 'POST',
+        url: '/__mock/time/advance',
+        headers: { 'content-type': 'multipart/form-data; boundary=x' },
+        payload: `{"ms":1}${' '.repeat(1024 * 1024)}`,
+      })
+      expect(huge.statusCode).toBe(400)
+      expect(engine.clock.now()).toBe(1_750_000_000_000)
+
+      // And through the same guarded parser as JSON: no __proto__ key.
+      const poisoned = await app.inject({
+        method: 'POST',
+        url: '/__mock/scenario',
+        headers: { 'content-type': 'text/plain' },
+        payload: '{"__proto__":{"polluted":true}}',
+      })
+      expect(poisoned.statusCode).toBe(400)
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+describe('a body that never ends, on the control API', () => {
+  it('is cut off near the control limit over real HTTP, not read to the media upload’s 101 MiB', async () => {
+    // Measured over a socket: an injected request buffers its whole stream
+    // before Fastify sees it, which would hide what this checks.
+    const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: 1_750_000_000_000 })
+    const app = createServer(engine)
+    await app.listen({ port: 0, host: '127.0.0.1' })
+    const { port } = app.server.address() as { port: number }
+    let sent = 0
+    try {
+      await new Promise<void>((resolve) => {
+        const req = httpRequest(
+          { host: '127.0.0.1', port, path: '/__mock/time/advance', method: 'POST', headers: { 'content-type': 'multipart/form-data; boundary=x' } },
+          (res) => {
+            res.resume()
+            res.on('end', resolve)
+          },
+        )
+        req.on('error', () => resolve())
+        const chunk = Buffer.alloc(64 * 1024, 0x20)
+        const pump = (): void => {
+          while (sent < 50 * 1024 * 1024) {
+            sent += chunk.length
+            if (!req.write(chunk)) {
+              req.once('drain', pump)
+              return
+            }
+          }
+          req.end()
+        }
+        pump()
+      })
+      expect(sent).toBeLessThan(10 * 1024 * 1024)
+      expect(engine.clock.now()).toBe(1_750_000_000_000)
+    } finally {
+      await app.close()
+    }
   })
 })

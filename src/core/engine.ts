@@ -1,11 +1,14 @@
 import { MediaService } from '../graph/media-service.js'
+import { BlockService } from '../graph/block-service.js'
+import { RegistrationService } from '../graph/registration-service.js'
+import type { BlockListOptions } from '../graph/block-service.js'
 import { CoexistenceService } from '../graph/coexistence-service.js'
 import type { CoexistenceSeed } from '../graph/coexistence-service.js'
 import { MessagingService } from '../graph/messaging-service.js'
 import type { SendMessageResponse, SimulateInboundOptions } from '../graph/messaging-service.js'
 import { TechProviderService } from '../graph/tech-provider-service.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
-import type { PhoneNumberListOptions } from '../graph/tech-provider-service.js'
+import type { PhoneNumberListOptions, SignupOptions } from '../graph/tech-provider-service.js'
 import { TemplateService } from '../graph/template-service.js'
 import type { TemplateCreateResponse, TemplateListOptions } from '../graph/template-service.js'
 import { WebhookDeliverer } from '../webhooks/delivery.js'
@@ -99,6 +102,9 @@ function startBudget(timeoutMs: number): { expired: Promise<void>; isExpired(): 
   }
 }
 
+const MESSAGING = 'whatsapp_business_messaging'
+const MANAGEMENT = 'whatsapp_business_management'
+
 export class WamockEngine {
   readonly clock: VirtualClock
   readonly state: MockState
@@ -116,6 +122,8 @@ export class WamockEngine {
   readonly #media: MediaService
   readonly #techProvider: TechProviderService
   readonly #coexistence: CoexistenceService
+  readonly #blocks: BlockService
+  readonly #registration: RegistrationService
   /** What every service is built from; the engine's own Graph checks use it too. */
   readonly #context: MockContext
   /** Whether a flush is running its rounds; see `flush()`. */
@@ -167,7 +175,9 @@ export class WamockEngine {
     // through a narrow interface rather than merging into one service.
     this.#coexistence = new CoexistenceService(context)
     this.#media = new MediaService(context)
-    this.#messaging = new MessagingService(context, this.#templates, this.#coexistence, this.#media)
+    this.#blocks = new BlockService(context)
+    this.#registration = new RegistrationService(context)
+    this.#messaging = new MessagingService(context, this.#templates, this.#coexistence, this.#media, this.#blocks)
     this.#techProvider = new TechProviderService(context, this.#coexistence)
   }
 
@@ -280,6 +290,8 @@ export class WamockEngine {
     this.#media.clear()
     this.#templates.clear()
     this.#coexistence.clear()
+    this.#blocks.clear()
+    this.#registration.clear()
     this.#techProvider.clear()
     this.deliverer.clear()
     this.state.reset()
@@ -395,13 +407,18 @@ export class WamockEngine {
 
   // --- tech provider -------------------------------------------------------
 
+  /**
+   * A customer finishing Embedded Signup. With a number (the default, or
+   * `phone: 'unverified'`) the result names it; with `phone: 'none'` there is
+   * none to name.
+   */
+  createSignup(options: SignupOptions & { phone: 'none' } & CoexistenceSeed): { code: string; waba_id: string }
   createSignup(
-    options: { subscribed?: boolean; businessId?: string; coexistence?: boolean } & CoexistenceSeed = {},
-  ): {
-    code: string
-    phone_number_id: string
-    waba_id: string
-  } {
+    options?: SignupOptions & { phone?: 'verified' | 'unverified' } & CoexistenceSeed,
+  ): { code: string; phone_number_id: string; waba_id: string }
+  // For a `phone` known only at run time, as the control API has it.
+  createSignup(options: SignupOptions & CoexistenceSeed): { code: string; phone_number_id?: string; waba_id: string }
+  createSignup(options: SignupOptions & CoexistenceSeed = {}): { code: string; phone_number_id?: string; waba_id: string } {
     return this.#techProvider.createSignup(options)
   }
 
@@ -497,6 +514,60 @@ export class WamockEngine {
     }
   }
 
+  /** `POST /{waba_id}/phone_numbers`: a new, unverified number. */
+  createPhoneNumber(wabaId: string, body: Record<string, unknown>): { id: string } {
+    return this.#registration.create(wabaId, body)
+  }
+
+  /** `POST /{phone_number_id}/request_code`. */
+  requestVerificationCode(phoneNumberId: string, params: Record<string, unknown>): { success: true } {
+    return this.#registration.requestCode(phoneNumberId, params)
+  }
+
+  /** The code `request_code` last "sent" to a number, as its SMS would read it. */
+  verificationCode(phoneNumberId: string): string | undefined {
+    return this.#registration.verificationCode(phoneNumberId)
+  }
+
+  /** `POST /{phone_number_id}/verify_code`. */
+  verifyCode(phoneNumberId: string, params: Record<string, unknown>): { success: true } {
+    return this.#registration.verifyCode(phoneNumberId, params)
+  }
+
+  /** `POST /{phone_number_id}/register`. */
+  registerPhoneNumber(phoneNumberId: string, body: Record<string, unknown>): { success: true } {
+    return this.#registration.register(phoneNumberId, body)
+  }
+
+  /**
+   * `POST /{phone_number_id}/deregister`. Meta: "You cannot use this endpoint
+   * to deregister a business phone number that is in use with both Cloud API
+   * and the WhatsApp Business app."
+   */
+  deregisterPhoneNumber(phoneNumberId: string): { success: true } {
+    if (this.#coexistence.isOnBizApp(phoneNumberId)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: 'A number in use with both Cloud API and the WhatsApp Business app cannot be deregistered',
+      })
+    }
+    return this.#registration.deregister(phoneNumberId)
+  }
+
+  /** `POST /{phone_number_id}/block_users`. */
+  blockUsers(phoneNumberId: string, body: Record<string, unknown>): Record<string, unknown> {
+    return this.#blocks.block(phoneNumberId, body)
+  }
+
+  /** `DELETE /{phone_number_id}/block_users`. */
+  unblockUsers(phoneNumberId: string, body: Record<string, unknown>): Record<string, unknown> {
+    return this.#blocks.unblock(phoneNumberId, body)
+  }
+
+  /** `GET /{phone_number_id}/block_users`. */
+  listBlockedUsers(phoneNumberId: string, options: BlockListOptions = {}): { data: unknown[]; paging?: Record<string, unknown> } {
+    return this.#blocks.list(phoneNumberId, options)
+  }
+
   unsubscribeApp(wabaId: string): { success: true } {
     return this.#techProvider.unsubscribeApp(wabaId)
   }
@@ -526,7 +597,7 @@ export class WamockEngine {
     accessToken: string | undefined,
     access: { objectId?: string; edge?: string; method?: 'get' | 'post' | 'delete' } = {},
   ): void {
-    assertToken(this.#context, accessToken, this.#scopeFor(access.objectId, access.edge))
+    assertToken(this.#context, accessToken, this.#scopesFor(access.objectId, access.edge))
     if (accessToken === undefined || access.objectId === undefined) return
     const grantedWaba = this.tokens.record(accessToken)?.wabaId
     if (grantedWaba === undefined) return
@@ -537,21 +608,30 @@ export class WamockEngine {
   }
 
   /**
-   * The permission a Graph call needs: whatsapp_business_messaging to send and
-   * handle media, whatsapp_business_management to manage templates, numbers
-   * and subscriptions. Calls outside both are not checked: `smb_app_data`,
-   * the coexistence sync, is the one left, and Meta's pages do not say which
-   * permission it needs. Ownership is still checked for it.
+   * The permissions a Graph call needs: whatsapp_business_messaging to send
+   * and handle media, whatsapp_business_management to manage templates,
+   * numbers and subscriptions, both to register a number. Calls outside them
+   * are not checked: `smb_app_data`
+   * (the coexistence sync) and `block_users`, for which Meta's pages name the
+   * token kinds but not the permission. Ownership is still checked for them.
    */
-  #scopeFor(objectId: string | undefined, edge: string | undefined): string | undefined {
-    if (edge === 'messages' || edge === 'media') return 'whatsapp_business_messaging'
-    if (edge === 'message_templates' || edge === 'phone_numbers' || edge === 'subscribed_apps') {
-      return 'whatsapp_business_management'
+  #scopesFor(objectId: string | undefined, edge: string | undefined): readonly string[] {
+    // Registering and deregistering need both, per Meta's registration page.
+    if (edge === 'register' || edge === 'deregister') return [MANAGEMENT, MESSAGING]
+    if (edge === 'messages' || edge === 'media') return [MESSAGING]
+    if (
+      edge === 'message_templates' ||
+      edge === 'phone_numbers' ||
+      edge === 'subscribed_apps' ||
+      edge === 'request_code' ||
+      edge === 'verify_code'
+    ) {
+      return [MANAGEMENT]
     }
-    if (edge !== undefined || objectId === undefined) return undefined
-    if (this.#media.ownerOf(objectId) !== undefined) return 'whatsapp_business_messaging'
-    if (this.state.phoneNumber(objectId) || this.state.waba(objectId)) return 'whatsapp_business_management'
-    return undefined
+    if (edge !== undefined || objectId === undefined) return []
+    if (this.#media.ownerOf(objectId) !== undefined) return [MESSAGING]
+    if (this.state.phoneNumber(objectId) || this.state.waba(objectId)) return [MANAGEMENT]
+    return []
   }
 
   /** The WABA an object belongs to: itself, its number's, or its media's. */
@@ -559,6 +639,18 @@ export class WamockEngine {
     if (this.state.waba(objectId)) return objectId
     const numberId = this.state.phoneNumber(objectId) ? objectId : this.#media.ownerOf(objectId)
     return numberId === undefined ? undefined : this.state.phoneNumber(numberId)?.wabaId
+  }
+
+  /** Control API: a portfolio deemed eligible for authentication-international rates. */
+  setAuthInternational(
+    businessId: string,
+    options: { startTime?: number; exceptions?: Array<{ country: string; startTime: number }>; primaryLocation?: string } = {},
+  ): { success: true } {
+    return this.#techProvider.setAuthInternational(businessId, options)
+  }
+
+  getWabaFields(wabaId: string, fields: string[]): Record<string, unknown> {
+    return this.#techProvider.getWabaFields(wabaId, fields)
   }
 
   getPhoneNumberFields(phoneNumberId: string, fields: string[]): Record<string, unknown> {

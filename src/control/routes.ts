@@ -6,6 +6,7 @@ import { TEMPLATE_CATEGORIES, TEMPLATE_STATUSES } from '../core/templates.js'
 import { MESSAGING_TIERS } from '../core/types.js'
 import type { Business, PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
+import { LAST_INSTANT_MS } from '../core/clock.js'
 import { MESSAGE_STATUSES } from '../webhooks/payloads.js'
 import type { InboundContent } from '../webhooks/payloads.js'
 
@@ -122,6 +123,10 @@ const SignupSchema = z
   .object({
     subscribed: z.boolean().optional(),
     business_id: z.string().min(1).optional(),
+    // How the customer finished: with a verified number, an unverified one, or
+    // none; and whether the test skips registering it.
+    phone: z.enum(['verified', 'unverified', 'none']).optional(),
+    registered: z.boolean().optional(),
     // A number already on the WhatsApp Business app, with what the app holds.
     coexistence: z.boolean().optional(),
     share_history: z.boolean().optional(),
@@ -180,6 +185,19 @@ const QualitySchema = z
   .object({
     phone_number_id: z.string().optional(),
     quality_rating: z.enum(['RED', 'YELLOW', 'GREEN', 'UNKNOWN']),
+  })
+  .strict()
+
+// Meta deeming a portfolio eligible for authentication-international rates.
+// Times are unix seconds, as Meta's webhooks and fields carry them.
+const AuthInternationalSchema = z
+  .object({
+    business_id: z.string().min(1).optional(),
+    start_time: integer().optional(),
+    exception_countries: z
+      .array(z.object({ country_code: z.string().regex(/^[A-Z]{2}$/), start_time: integer() }).strict())
+      .optional(),
+    primary_business_location: z.string().regex(/^[A-Z]{2}$/).optional(),
   })
   .strict()
 
@@ -346,8 +364,8 @@ interface WabaView {
   subscribedApps: string[]
 }
 
-/** A number as `/__mock/state` reports it: never its override's verify token. */
-type PhoneNumberView = Omit<PhoneNumber, 'callbackOverride'>
+/** A number as `/__mock/state` reports it: never its override's verify token or its PIN. */
+type PhoneNumberView = Omit<PhoneNumber, 'callbackOverride' | 'pin'>
 
 export interface StateSnapshot {
   now: number
@@ -376,7 +394,7 @@ export function buildStateSnapshot(engine: WamockEngine): StateSnapshot {
     // Deliberately no app secrets: this endpoint is meant to be curl-ed and
     // pasted into bug reports.
     businesses: engine.state.businesses(),
-    phoneNumbers: engine.state.phoneNumbers().map(({ callbackOverride: _override, ...view }) => view),
+    phoneNumbers: engine.state.phoneNumbers().map(({ callbackOverride: _override, pin: _pin, ...view }) => view),
     wabas: engine.state.wabas().map((waba) => ({
       wabaId: waba.wabaId,
       appId: waba.appId,
@@ -419,6 +437,11 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     if (!parsed.success || parsed.data.ms < 0) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
         details: 'Param ms must be a non-negative integer number of milliseconds',
+      })
+    }
+    if (engine.clock.now() + parsed.data.ms > LAST_INSTANT_MS) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: 'Param ms would move the clock past the last instant a date can hold',
       })
     }
     engine.clock.advance(parsed.data.ms)
@@ -503,9 +526,14 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const update = Object.fromEntries(
       Object.entries(parsed.data).filter(([, value]) => value !== undefined),
     )
-    // Range violations surface from the controller as RangeError; the server's
-    // error handler turns them into a Meta-shaped 100.
-    engine.scenario.configure(update)
+    // The controller reports a value out of range as a RangeError: the
+    // caller's mistake, so a 100, not the 500 a fault in the mock gets.
+    try {
+      engine.scenario.configure(update)
+    } catch (error) {
+      if (error instanceof RangeError) throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: error.message })
+      throw error
+    }
     return reply.send({ success: true, scenario: engine.scenario.config })
   })
 
@@ -528,6 +556,8 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
       engine.createSignup({
         ...(data.subscribed !== undefined ? { subscribed: data.subscribed } : {}),
         ...(data.business_id !== undefined ? { businessId: data.business_id } : {}),
+        ...(data.phone !== undefined ? { phone: data.phone } : {}),
+        ...(data.registered !== undefined ? { registered: data.registered } : {}),
         ...(data.coexistence !== undefined ? { coexistence: data.coexistence } : {}),
         ...(data.share_history !== undefined ? { shareHistory: data.share_history } : {}),
         ...(data.contacts !== undefined
@@ -676,6 +706,35 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
   )
 
   app.get('/__mock/state', async (_request, reply) => reply.send(buildStateSnapshot(engine)))
+
+  app.post('/__mock/auth-international', async (request, reply) => {
+    const parsed = AuthInternationalSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: describeIssues(parsed.error, request.body ?? {}) })
+    }
+    const { data } = parsed
+    return reply.send(
+      engine.setAuthInternational(data.business_id ?? engine.state.defaultBusinessId, {
+        ...(data.start_time !== undefined ? { startTime: data.start_time * 1000 } : {}),
+        ...(data.exception_countries !== undefined
+          ? { exceptions: data.exception_countries.map((e) => ({ country: e.country_code, startTime: e.start_time * 1000 })) }
+          : {}),
+        ...(data.primary_business_location !== undefined ? { primaryLocation: data.primary_business_location } : {}),
+      }),
+    )
+  })
+
+  // The code `request_code` last "sent" to a number, as its SMS would read.
+  app.get<{ Querystring: { phone_number_id?: string } }>('/__mock/verification-code', async (request, reply) => {
+    const phoneNumberId = request.query.phone_number_id
+    const code = phoneNumberId === undefined ? undefined : engine.verificationCode(phoneNumberId)
+    if (code === undefined) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: phoneNumberId === undefined ? 'phone_number_id is required' : `No verification code was requested for ${phoneNumberId}`,
+      })
+    }
+    return reply.send({ code })
+  })
 
   app.post('/__mock/reset', async (_request, reply) => {
     engine.reset()

@@ -46,7 +46,8 @@ const call = (method: 'GET' | 'POST' | 'DELETE', url: string, token?: string, pa
 
 /** Sign a tenant up and exchange its code, as a tech provider's backend does. */
 function onboard() {
-  const signup = engine.createSignup()
+  // Registered: these tests are about tokens, subscriptions and routing.
+  const signup = engine.createSignup({ registered: true })
   const { access_token: token } = engine.exchangeCode(engine.state.defaultAppId, SECRET, signup.code)
   return { ...signup, token }
 }
@@ -95,7 +96,7 @@ describe('business tokens reach only their own customer', () => {
     expect((await call('DELETE', `/v26.0/${encoded(b.waba_id)}/subscribed_apps`, a.token)).statusCode).toBe(400)
 
     const { access_token: none } = engine.issueToken({ scopes: [] })
-    expect((await call('GET', `/v26.0/${a.waba_id}/%70hone_numbers`, none)).statusCode).toBe(400)
+    expect((await call('GET', `/v26.0/${a.waba_id}/%70hone_numbers`, none)).json().error.code).toBe(200)
 
     const { access_token: revoked } = engine.issueToken()
     engine.tokens.revoke(revoked)
@@ -114,7 +115,7 @@ describe('business tokens reach only their own customer', () => {
     const path = url.pathname + url.search
     expect((await call('GET', path, a.token)).statusCode).toBe(400)
     const { access_token: managementOnly } = engine.issueToken({ scopes: ['whatsapp_business_management'] })
-    expect((await call('GET', path, managementOnly)).statusCode).toBe(400)
+    expect((await call('GET', path, managementOnly)).json().error.code).toBe(200)
     expect((await call('GET', path, b.token)).statusCode).toBe(200)
   })
 
@@ -145,7 +146,9 @@ describe('permissions per endpoint', () => {
     expect((await call('GET', `/v26.0/${waba}/message_templates`, messagingOnly)).json().error.error_data.details).toMatch(
       /whatsapp_business_management/,
     )
-    expect((await call('GET', `/v26.0/${waba}/phone_numbers`, messagingOnly)).statusCode).toBe(400)
+    // Graph's permissions error: code 200, HTTP 403.
+    const refused = await call('GET', `/v26.0/${waba}/phone_numbers`, messagingOnly)
+    expect([refused.statusCode, refused.json().error.code, refused.json().error.message]).toEqual([403, 200, '(#200) Permissions error'])
     expect((await call('GET', `/v26.0/${waba}/message_templates`, managementOnly)).statusCode).toBe(200)
 
     engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
@@ -156,10 +159,10 @@ describe('permissions per endpoint', () => {
     expect((await call('POST', `/v26.0/${pnid}/messages`, messagingOnly, send)).statusCode).toBe(200)
 
     // Reading a number is management; reading media is messaging.
-    expect((await call('GET', `/v26.0/${pnid}?fields=id`, messagingOnly)).statusCode).toBe(400)
+    expect((await call('GET', `/v26.0/${pnid}?fields=id`, messagingOnly)).statusCode).toBe(403)
     expect((await call('GET', `/v26.0/${pnid}?fields=id`, managementOnly)).statusCode).toBe(200)
     const { id } = engine.uploadMedia(pnid, { messaging_product: 'whatsapp', type: 'image/jpeg', file: { bytes: Buffer.from('x') } })
-    expect((await call('GET', `/v26.0/${id}`, managementOnly)).statusCode).toBe(400)
+    expect((await call('GET', `/v26.0/${id}`, managementOnly)).statusCode).toBe(403)
     expect((await call('GET', `/v26.0/${id}`, messagingOnly)).statusCode).toBe(200)
   })
 })
@@ -277,7 +280,7 @@ describe('subscribing a tenant is a step of its own', () => {
         throw new Error('receiver returned HTTP 500')
       },
     })
-    const tenant = e.createSignup({ subscribed: true })
+    const tenant = e.createSignup({ subscribed: true, registered: true })
     e.simulateInbound({ phoneNumberId: tenant.phone_number_id, from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
     await e.flush()
     const before = attempts.filter((f) => f === 'messages').length
@@ -434,6 +437,18 @@ describe('callback overrides, as Meta routes them', () => {
     const state = (await call('GET', '/__mock/state')).body
     expect(state).toContain(tenant.phone_number_id)
     expect(state).not.toContain('secret-vt')
+  })
+
+  it('takes the token in a form body as authentication, not as a setting', async () => {
+    const tenant = onboard()
+    await subscribed(tenant)
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v26.0/${tenant.phone_number_id}`,
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: `webhook_configuration=${encodeURIComponent(JSON.stringify({ override_callback_uri: '' }))}&access_token=${tenant.token}`,
+    })
+    expect(res.json()).toEqual({ success: true })
   })
 
   it('needs the WABA subscribed before a number can override its callback', async () => {

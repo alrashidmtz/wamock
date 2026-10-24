@@ -457,7 +457,7 @@ describe('reaction messages', () => {
 
   it('fails when the target is the same customer’s chat with another of the business’s numbers', async () => {
     const { e, statusesOf, flush } = withWebhooks()
-    const other = e.createSignup({ subscribed: true }).phone_number_id
+    const other = e.createSignup({ subscribed: true, registered: true }).phone_number_id
     e.simulateInbound({ from: CUSTOMER, message: { type: 'text', text: { body: 'hola' } } })
     const received = e.simulateInbound({ phoneNumberId: other, from: CUSTOMER, message: { type: 'text', text: { body: 'hola' } } }).messageId
     const sent = e.sendMessage(other, { messaging_product: 'whatsapp', to: CUSTOMER, type: 'text', text: { body: 'hi' } }).messages[0]!.id

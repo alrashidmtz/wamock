@@ -62,6 +62,8 @@ export class MockState {
   #wabas = new Map<string, Waba>()
   #phoneNumbers = new Map<string, PhoneNumber>()
   #templates = new Map<string, Template>()
+  /** Ids other collaborators minted (media), in the one space Graph ids share. */
+  #reservedIds = new Set<string>()
   #outbound: OutboundMessage[] = []
   #inbound = new Map<string, InboundRecord>()
   #readReceipts: ReadReceipt[] = []
@@ -85,11 +87,33 @@ export class MockState {
    * blocked by a cap it did not ask for.
    */
   registerBusiness(businessId: string, messagingTier: MessagingTier = 'TIER_UNLIMITED'): void {
+    this.#assertFree(businessId, 'business')
     this.#businesses.set(businessId, { businessId, messagingTier })
   }
 
   registerApp(app: App): void {
+    this.#assertFree(app.appId, 'app')
     this.#apps.set(app.appId, { ...app })
+  }
+
+  /**
+   * Graph ids are one space, whoever chooses them: a test, an option, or the
+   * mock. An id another kind of object already holds is refused before
+   * anything changes; re-registering the same object updates it.
+   */
+  #assertFree(id: string, kind: 'business' | 'app' | 'waba' | 'phone' | 'media' | 'template', templateKey?: string): void {
+    const holders: Array<[string, boolean]> = [
+      ['business', this.#businesses.has(id)],
+      ['app', this.#apps.has(id)],
+      ['waba', this.#wabas.has(id)],
+      ['phone', this.#phoneNumbers.has(id)],
+      ['media', this.#reservedIds.has(id)],
+    ]
+    const other = holders.find(([holder, held]) => held && holder !== kind)?.[0]
+    const template = [...this.#templates.entries()].find(([key, t]) => t.id === id && !(kind === 'template' && key === templateKey))
+    if (other !== undefined || template !== undefined) {
+      throw new Error(`Cannot register ${kind} ${id}: a ${other ?? 'template'} already has that id`)
+    }
   }
 
   /** Without a `businessId` the WABA joins the default portfolio, and shares its limit. */
@@ -99,6 +123,7 @@ export class MockState {
       businessId?: string
     },
   ): void {
+    this.#assertFree(waba.wabaId, 'waba')
     const businessId = waba.businessId ?? this.defaultBusinessId
     if (!this.#apps.has(waba.appId)) {
       throw new Error(`Cannot register WABA ${waba.wabaId}: unknown app ${waba.appId}`)
@@ -153,6 +178,7 @@ export class MockState {
   }
 
   registerPhoneNumber(phoneNumber: PhoneNumber): void {
+    this.#assertFree(phoneNumber.phoneNumberId, 'phone')
     if (!this.#wabas.has(phoneNumber.wabaId)) {
       throw new Error(
         `Cannot register phone number ${phoneNumber.phoneNumberId}: unknown WABA ${phoneNumber.wabaId}`,
@@ -183,6 +209,34 @@ export class MockState {
   /** The business portfolio that owns this number, through its WABA. */
   businessIdOf(phoneNumberId: string): string | undefined {
     return this.#wabas.get(this.#phoneNumbers.get(phoneNumberId)?.wabaId ?? '')?.businessId
+  }
+
+  /** Authentication-international eligibility and primary location, as Meta sets them. */
+  updateBusiness(businessId: string, change: Partial<Pick<Business, 'authInternational' | 'primaryLocation'>>): void {
+    const business = this.#businesses.get(businessId)
+    if (!business) throw new Error(`Cannot update unknown business ${businessId}`)
+    this.#businesses.set(businessId, { ...business, ...change })
+  }
+
+  /**
+   * Whether any object already answers to this id. Graph ids are one space:
+   * a number minted with a WABA's id would let that WABA's token reach it.
+   */
+  isIdTaken(id: string): boolean {
+    return (
+      this.#phoneNumbers.has(id) ||
+      this.#wabas.has(id) ||
+      this.#businesses.has(id) ||
+      this.#apps.has(id) ||
+      this.#reservedIds.has(id) ||
+      [...this.#templates.values()].some((template) => template.id === id)
+    )
+  }
+
+  /** Claim an id held outside this state (media), so nothing else is minted with it. */
+  reserveId(id: string): void {
+    this.#assertFree(id, 'media')
+    this.#reservedIds.add(id)
   }
 
   business(businessId: string): Business | undefined {
@@ -228,9 +282,9 @@ export class MockState {
   // --- templates ----------------------------------------------------------
 
   putTemplate(template: Template): void {
-    this.#templates.set(templateKey(template.wabaId, template.name, template.language), {
-      ...template,
-    })
+    const key = templateKey(template.wabaId, template.name, template.language)
+    this.#assertFree(template.id, 'template', key)
+    this.#templates.set(key, { ...template })
   }
 
   /**
@@ -325,6 +379,7 @@ export class MockState {
     this.#wabas = new Map()
     this.#phoneNumbers = new Map()
     this.#templates = new Map()
+    this.#reservedIds = new Set()
     this.#outbound = []
     this.#inbound = new Map()
     this.#readReceipts = []

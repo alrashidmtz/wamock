@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import type { FastifyBodyParser, FastifyInstance, FastifyRequest } from 'fastify'
 
 import { registerControlRoutes } from './control/routes.js'
+import { FORWARDED_HOST_HEADER } from './intercept.js'
 import { DOWNLOAD_PATH } from './graph/media-service.js'
 import { parseMultipart, parseUrlEncoded } from './http/forms.js'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './core/engine.js'
@@ -36,6 +37,42 @@ function bearerToken(headers: Record<string, unknown>): string | undefined {
   return token === '' ? undefined : token
 }
 
+/**
+ * The token of a Graph call, wherever Graph takes it: the Authorization
+ * header, or an `access_token` parameter in the query or the body. Reading
+ * only the header let a token in the query go unchecked: an expired one
+ * passed, and a tenant's token reached another tenant.
+ */
+/**
+ * Where URLs this answer hands out should point: the mock's own address, or,
+ * for a request the interceptor redirected, nowhere of ours, so each edge
+ * falls back to Meta's host as Meta answers it.
+ */
+function publicBase(request: FastifyRequest): string | undefined {
+  if (request.headers[FORWARDED_HOST_HEADER] !== undefined) return undefined
+  const host = request.headers.host
+  if (host === undefined) return undefined
+  const base = `${request.protocol}://${host}`
+  // The Host header is the caller's input: one that is no host is its 100,
+  // not a fault when a URL is built from it.
+  try {
+    new URL(base)
+  } catch {
+    throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: `The Host header (${host}) is not a valid host` })
+  }
+  return base
+}
+
+function graphToken(request: FastifyRequest): string | undefined {
+  const fromHeader = bearerToken(request.headers)
+  if (fromHeader !== undefined) return fromHeader
+  for (const source of [request.query, request.body]) {
+    const value = typeof source === 'object' && source !== null ? (source as Record<string, unknown>)['access_token'] : undefined
+    if (typeof value === 'string' && value !== '') return value
+  }
+  return undefined
+}
+
 export interface ServerOptions {
   /** Emit a line per request. Off by default so tests stay quiet. */
   logger?: boolean
@@ -64,33 +101,38 @@ function pagingQuery(request: FastifyRequest<{ Params: { version: string }; Quer
   if (limit !== undefined && !(/^\d+$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 100)) {
     throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param limit must be an integer between 1 and 100' })
   }
-  const host = request.headers.host
+  const baseUrl = publicBase(request)
   return {
     ...(limit !== undefined ? { limit: Number(limit) } : {}),
     ...(after !== undefined ? { after } : {}),
     ...(before !== undefined ? { before } : {}),
-    ...(host !== undefined ? { baseUrl: `${request.protocol}://${host}` } : {}),
+    ...(baseUrl !== undefined ? { baseUrl } : {}),
     version: request.params.version,
   }
 }
 
 export function createServer(engine: WamockEngine, options: ServerOptions = {}): FastifyInstance {
-  const app = Fastify({
-    logger: options.logger ?? false,
-    // Explicit rather than inherited: a mock accepts arbitrary bodies from
-    // whatever is under test, and 1 MiB is far above any real WhatsApp payload.
-    bodyLimit: options.bodyLimit ?? 1024 * 1024,
-  })
+  // Explicit rather than inherited: a mock accepts arbitrary bodies from
+  // whatever is under test, and 1 MiB is far above any real WhatsApp payload.
+  const bodyLimit = options.bodyLimit ?? 1024 * 1024
+  const app = Fastify({ logger: options.logger ?? false, bodyLimit })
 
   // Every failure leaves as a Meta-shaped body. A fastify-shaped error would
   // teach the integration under test to parse something Meta never sends.
   app.setErrorHandler((error: unknown, _request, reply) => {
+    const message = error instanceof Error ? error.message : String(error)
+    // A request Fastify could not read (bad JSON, an oversized body) is the
+    // caller's, and Graph answers it 100. Anything else that is not a
+    // GraphError is a fault in wamock: answered 500, and named as such, rather
+    // than passed off as a 100 the request earned.
+    const status = (error as { statusCode?: unknown }).statusCode
+    const clientError = typeof status === 'number' && status >= 400 && status < 500
     const graphError =
       error instanceof GraphError
         ? error
-        : new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-            details: error instanceof Error ? error.message : String(error),
-          })
+        : clientError
+          ? new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: message })
+          : new GraphError(ERROR_CODES.UNKNOWN, { details: `wamock internal error: ${message}` })
     return reply.status(graphError.httpStatus).send(graphError.toBody(engine.nextFbtraceId()))
   })
 
@@ -113,6 +155,9 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   // Meta, so it takes the ergonomic reading: a body that parses as JSON is
   // JSON. The Graph routes below stay strict, where the fidelity actually
   // matters, which is why this checks the path rather than parsing everything.
+  // Fastify's own JSON parser, which guards against `__proto__` and
+  // `constructor` keys; every JSON body goes through it.
+  const parseJson = app.getDefaultJsonParser('error', 'error')
   const parseControlBody: FastifyBodyParser<string> = (request, body, done) => {
     if (!request.url.startsWith('/__mock/')) {
       done(
@@ -128,22 +173,39 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       done(null, {})
       return
     }
-    try {
-      done(null, JSON.parse(raw))
-    } catch {
-      done(
-        new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-          details: 'Body is not valid JSON. The control API reads every body as JSON.',
-        }),
-        undefined,
-      )
-    }
+    // Fastify's own parser, for its guard against `__proto__` and
+    // `constructor` keys; a parse failure keeps this API's wording.
+    parseJson(request, raw, (error, value) => {
+      if (error) {
+        done(
+          new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+            details: 'Body is not valid JSON. The control API reads every body as JSON.',
+          }),
+          undefined,
+        )
+        return
+      }
+      done(null, value)
+    })
   }
 
   // The catch-all covers what curl's `-d` sends. `text/plain` needs naming
   // separately because Fastify parses it itself, handing the route a string
   // that then failed validation as "Expected object, received string" — a
   // message that describes the symptom and hides the cause.
+  // JSON with no body is no parameters, not an error: Meta's own examples
+  // call request_code, verify_code and deregister with nothing but a query,
+  // and many clients still send `content-type: application/json`.
+  // Only the empty body is answered here; the rest goes to parseJson.
+  app.removeContentTypeParser('application/json')
+  app.addContentTypeParser('application/json', { parseAs: 'string' }, (request, body, done) => {
+    const text = typeof body === 'string' ? body : body.toString()
+    if (text.trim() === '') {
+      done(null, {})
+      return
+    }
+    parseJson(request, text, done)
+  })
   app.addContentTypeParser('*', { parseAs: 'string' }, parseControlBody)
   app.addContentTypeParser('text/plain', { parseAs: 'string' }, parseControlBody)
 
@@ -160,12 +222,13 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   )
   app.addContentTypeParser(
     'multipart/form-data',
-    // Documents go up to 100 MB; leave room for the multipart framing.
-    { parseAs: 'buffer', bodyLimit: MULTIPART_BODY_LIMIT },
+    // Read by Fastify like any body, under the route's limit: 1 MiB, except
+    // the media upload route, which takes documents up to 100 MB.
+    { parseAs: 'buffer' },
     (request, body: Buffer, done) => {
-      const fields = request.url.startsWith('/__mock/')
-        ? undefined
-        : parseMultipart(body, String(request.headers['content-type'] ?? ''))
+      // The control API reads every body as JSON, this content type included.
+      if (request.url.startsWith('/__mock/')) return parseControlBody(request, body.toString(), done)
+      const fields = parseMultipart(body, String(request.headers['content-type'] ?? ''))
       if (fields === undefined) {
         done(new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Malformed multipart/form-data body' }), undefined)
         return
@@ -211,8 +274,10 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   }
   // Writes only: a read flushed in `preHandler` already, and its handler sets
   // nothing off.
-  app.addHook('onSend', async (request, _reply, payload) => {
-    if (request.method !== 'GET' && request.url.startsWith('/__mock/')) await flushOnce(request)
+  // Not when answering a fault: the drain that failed would run, and fail,
+  // again while the error is being rendered, and lose its Graph body.
+  app.addHook('onSend', async (request, reply, payload) => {
+    if (request.method !== 'GET' && request.url.startsWith('/__mock/') && reply.statusCode < 500) await flushOnce(request)
     return payload
   })
 
@@ -244,7 +309,7 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       }
       const body = (request.body ?? {}) as Record<string, unknown>
       return reply.send(
-        engine.postMessages(request.params.phoneNumberId, body, bearerToken(request.headers)),
+        engine.postMessages(request.params.phoneNumberId, body, graphToken(request)),
       )
     },
   )
@@ -325,6 +390,18 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    * never from the raw URL: `%50NID_…` routes to `PNID_…`, so a check on the
    * raw text would authorize one object and serve another.
    */
+  // A parameter given twice reaches a handler as an array. Every route reads
+  // its query as single values, and a repeated `access_token` would have
+  // slipped past the token check, so it is refused for all of them at once.
+  // Meta documents no handling of a repeated parameter; refusing it is
+  // wamock's choice, made so the token check cannot be skipped.
+  app.addHook('preHandler', async (request) => {
+    const repeated = Object.entries((request.query ?? {}) as Record<string, unknown>).find(([, value]) => Array.isArray(value))
+    if (repeated) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: `Param ${repeated[0]} is given more than once` })
+    }
+  })
+
   app.addHook('preHandler', async (request) => {
     const params = (request.params ?? {}) as Record<string, string | undefined>
     const route = request.routeOptions.url ?? ''
@@ -332,7 +409,7 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     if (route === '/:version/oauth/access_token' || route === '/:version/debug_token') return
     const objectId = params['phoneNumberId'] ?? params['wabaId'] ?? params['objectId']
     const edge = route.split('/')[3]
-    engine.assertAccessToken(bearerToken(request.headers), {
+    engine.assertAccessToken(graphToken(request), {
       ...(objectId !== undefined ? { objectId } : {}),
       ...(edge !== undefined ? { edge } : {}),
       method: request.method === 'DELETE' ? 'delete' : request.method === 'POST' ? 'post' : 'get',
@@ -361,6 +438,51 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     },
   )
 
+  // Putting a number on Cloud API: create, request a code, verify, register.
+  // `request_code` and `verify_code` take their parameters in the query, as
+  // Meta's examples do, or in the body (its other example posts a form).
+  const params = (request: FastifyRequest): Record<string, unknown> => ({
+    ...((request.body ?? {}) as Record<string, unknown>),
+    ...(request.query as Record<string, unknown>),
+  })
+  app.post<{ Params: { version: string; wabaId: string } }>('/:version/:wabaId/phone_numbers', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.createPhoneNumber(request.params.wabaId, (request.body ?? {}) as Record<string, unknown>))
+  })
+  app.post<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/request_code', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.requestVerificationCode(request.params.phoneNumberId, params(request)))
+  })
+  app.post<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/verify_code', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.verifyCode(request.params.phoneNumberId, params(request)))
+  })
+  app.post<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/register', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.registerPhoneNumber(request.params.phoneNumberId, (request.body ?? {}) as Record<string, unknown>))
+  })
+  app.post<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/deregister', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.deregisterPhoneNumber(request.params.phoneNumberId))
+  })
+
+  // The Block Users API: block, unblock and list a number's blocked customers.
+  app.post<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/block_users', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.blockUsers(request.params.phoneNumberId, (request.body ?? {}) as Record<string, unknown>))
+  })
+  app.delete<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/block_users', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(engine.unblockUsers(request.params.phoneNumberId, (request.body ?? {}) as Record<string, unknown>))
+  })
+  app.get<{ Params: { version: string; phoneNumberId: string }; Querystring: Record<string, string> }>(
+    '/:version/:phoneNumberId/block_users',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(engine.listBlockedUsers(request.params.phoneNumberId, pagingQuery(request)))
+    },
+  )
+
   // Coexistence: request the Business app's contacts or chat history, once
   // each, within 24 hours of onboarding.
   app.post<{ Params: { version: string; phoneNumberId: string } }>(
@@ -374,6 +496,9 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
 
   app.post<{ Params: { version: string; phoneNumberId: string } }>(
     '/:version/:phoneNumberId/media',
+    // Documents go up to 100 MB; leave room for the multipart framing. This
+    // route alone: everywhere else keeps the server's limit.
+    { bodyLimit: MULTIPART_BODY_LIMIT },
     async (request, reply) => {
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
       const body = (request.body ?? {}) as Record<string, unknown>
@@ -395,20 +520,21 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
       const { objectId } = request.params
 
-      if (engine.state.phoneNumber(objectId)) {
-        const fields = (request.query.fields ?? '')
-          .split(',')
-          .map((field) => field.trim())
-          .filter(Boolean)
-        return reply.send(engine.getPhoneNumberFields(objectId, fields))
-      }
+      const fields = (request.query.fields ?? '')
+        .split(',')
+        .map((field) => field.trim())
+        .filter(Boolean)
+      if (engine.state.phoneNumber(objectId)) return reply.send(engine.getPhoneNumberFields(objectId, fields))
+      if (engine.state.waba(objectId)) return reply.send(engine.getWabaFields(objectId, fields))
 
       // The download URL points back at this server, so a client that only
-      // knows a base URL can fetch the bytes too.
+      // knows a base URL can fetch the bytes too; through the interceptor it
+      // is Meta's lookaside URL, which the interceptor routes here.
+      const baseUrl = publicBase(request)
       return reply.send(
         engine.getMedia(objectId, {
           ...(request.query.phone_number_id !== undefined ? { phoneNumberId: request.query.phone_number_id } : {}),
-          baseUrl: `${request.protocol}://${request.headers.host ?? 'localhost'}`,
+          ...(baseUrl !== undefined ? { baseUrl } : {}),
         }),
       )
     },

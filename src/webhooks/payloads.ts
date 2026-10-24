@@ -378,6 +378,8 @@ const STATUS_ERROR_TITLES: Record<number, string> = {
     'Unable to deliver the message. This recipient has chosen to stop receiving marketing messages on WhatsApp from your business.',
   // Meta's error code reference gives this sentence and no shorter title.
   131053: 'Unable to upload the media used in the message.',
+  // Meta's error code reference gives this sentence and no shorter title.
+  130403: 'Unable to deliver the message. This business has blocked the end user on WhatsApp',
   130429: 'Rate limit hit',
   132015: 'Template is paused',
   131000: 'Something went wrong',

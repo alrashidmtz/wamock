@@ -12,6 +12,8 @@
 export const ERROR_CODES = {
   /** Malformed / invalid parameter. Also what Meta returns when interactive limits are exceeded. */
   INVALID_PARAMETER: 100,
+  /** Graph's "invalid request or possible server error": what a fault inside wamock answers. */
+  UNKNOWN: 1,
   /** Token missing or unusable. */
   TOKEN_INVALID: 0,
   /** Token expired mid-flight — the expensive silent failure of spec §9.2. */
@@ -38,6 +40,12 @@ export const ERROR_CODES = {
   TEMPLATE_VALIDATION: 132018,
   /** No template for that name + language pair. */
   TEMPLATE_NOT_FOUND: 132001,
+  /** Some users in a block or unblock request could not be (un)blocked. */
+  BLOCK_USERS_FAILED: 139100,
+  /** A blocked-users page requested with a cursor from before the list changed. */
+  BLOCKLIST_CHANGED: 139102,
+  /** A message to a customer the business blocked: on the status, not the send. */
+  BLOCKED_USER: 130403,
   /** Listing templates (v24+) with a `before`/`after` cursor that names no template. */
   INVALID_PAGINATION_CURSOR: 131059,
   /** Template paused by Meta for quality. Permanent until it transitions back. */
@@ -50,12 +58,22 @@ export const ERROR_CODES = {
   BSUID_NOT_SUPPORTED: 131062,
   /** The number is not (or no longer) on Cloud API, e.g. a disconnected coexistence number. */
   NOT_REGISTERED: 133010,
+  /** `register` for a number whose ownership was not verified yet. */
+  NOT_VERIFIED: 133006,
+  /** `register` with a PIN other than the number's two-step verification PIN. */
+  PIN_INCORRECT: 133005,
+  /** More than 10 register/deregister calls for a number in 72 hours. */
+  REGISTRATION_LIMIT: 133016,
+  /** `request_code` for a number that is already verified. */
+  ALREADY_VERIFIED: 136024,
   /** `smb_app_data` called a second time for the same sync type. */
   SYNC_LIMIT_EXCEEDED: 2593107,
   /** `smb_app_data` called 24 hours or more after onboarding. */
   SYNC_WINDOW_CLOSED: 2593108,
   /** Generic transient Meta-side failure. Retriable. */
   INTERNAL: 131000,
+  /** The token lacks a permission the call needs (Graph's 200-299 range). */
+  PERMISSION_DENIED: 200,
 } as const
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]
@@ -79,6 +97,12 @@ interface CatalogEntry {
    * crashes on the OAuth ones, which is a bug worth reproducing.
    */
   errorData: boolean
+  /**
+   * Whether `error_data` carries `messaging_product`. Meta's general error
+   * syntax shows it; the Block Users examples show `details` alone. Defaults
+   * to true.
+   */
+  productInErrorData?: boolean
   retriable: boolean
 }
 
@@ -180,6 +204,36 @@ const CATALOG: Record<number, CatalogEntry> = {
     errorData: true,
     retriable: false,
   },
+  [ERROR_CODES.BLOCK_USERS_FAILED]: {
+    // Meta's "Block users" page, verbatim. The status code is not shown; the
+    // body carries an `error`, so it is answered as Graph errors are, 400.
+    message: 'Failed to block/unblock users',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Failed to block some users, see the block_users response list for details',
+    errorData: true,
+    productInErrorData: false,
+    retriable: false,
+  },
+  [ERROR_CODES.BLOCKLIST_CHANGED]: {
+    // Meta's "Block users" page: the title and the description, verbatim.
+    message: 'Blocklist concurrent update',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Occurs when the blocklist is updated while performing a pagination request and version_id does not match.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.BLOCKED_USER]: {
+    // Meta's error code reference gives this sentence and no shorter title,
+    // as for 131050.
+    message: 'Unable to deliver the message. This business has blocked the end user on WhatsApp',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Unable to deliver the message. This business has blocked the end user on WhatsApp',
+    errorData: true,
+    retriable: false,
+  },
   [ERROR_CODES.TEMPLATE_VALIDATION]: {
     // Meta's error code reference, verbatim.
     message: 'Template validation error',
@@ -233,6 +287,69 @@ const CATALOG: Record<number, CatalogEntry> = {
     type: 'OAuthException',
     httpStatus: 400,
     details: 'Register the phone number before trying again.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.UNKNOWN]: {
+    // Meta's error code reference describes code 1 as "Invalid request or
+    // possible server error" without a message; this one is wamock's. It is
+    // what a fault in the mock itself answers, so it never passes for a 100
+    // the request earned.
+    message: 'An unknown error occurred',
+    type: 'OAuthException',
+    httpStatus: 500,
+    details: 'Invalid request or possible server error.',
+    errorData: true,
+    retriable: true,
+  },
+  [ERROR_CODES.PERMISSION_DENIED]: {
+    // Meta's error code reference puts a missing permission at 200-299, and
+    // its registration page names 200 for deregistering without
+    // whatsapp_business_management; the API references answer it with 403.
+    // "Permissions error" is Graph's title for 200 as integrators report it.
+    message: 'Permissions error',
+    type: 'OAuthException',
+    httpStatus: 403,
+    details: 'Permission is either not granted or has been removed.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.NOT_VERIFIED]: {
+    // Meta's error code reference gives this sentence and no shorter title.
+    message: 'Phone number needs to be verified before registering.',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Phone number needs to be verified before registering.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.PIN_INCORRECT]: {
+    // Meta's error code reference gives this sentence and no shorter title.
+    message: 'Two-step verification PIN incorrect.',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Two-step verification PIN incorrect.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.REGISTRATION_LIMIT]: {
+    // Meta's error code reference, verbatim.
+    message:
+      'Registration or Deregistration failed because there were too many attempts for this phone number in a short period of time',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details:
+      'Registration or Deregistration failed because there were too many attempts for this phone number in a short period of time',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.ALREADY_VERIFIED]: {
+    // Meta's phone number page documents the code and its HTTP 400, not the
+    // wording; this message is wamock's.
+    message: 'Phone number is already verified',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Check code_verification_status before requesting a code.',
     errorData: true,
     retriable: false,
   },
@@ -306,7 +423,7 @@ export interface GraphErrorBody {
     type: string
     code: number
     error_subcode?: number
-    error_data?: { messaging_product: string; details: string }
+    error_data?: { messaging_product?: string; details: string }
     fbtrace_id: string
   }
 }
@@ -318,6 +435,11 @@ export interface GraphErrorOptions {
   message?: string
   /** Overrides the shape for a Graph-level error that is not in the WhatsApp catalogue. */
   shape?: Partial<Pick<CatalogEntry, 'type' | 'subcode' | 'errorData' | 'codePrefix' | 'httpStatus'>>
+  /**
+   * Fields Meta returns beside `error`, as the Block Users API does with the
+   * users it did and did not block.
+   */
+  extra?: Record<string, unknown>
 }
 
 /**
@@ -339,6 +461,7 @@ export class GraphError extends Error {
   readonly httpStatus: number
   readonly #entry: CatalogEntry
   readonly #details: string | undefined
+  readonly #extra: Record<string, unknown> | undefined
 
   constructor(code: number, options: GraphErrorOptions = {}) {
     const entry = { ...entryFor(code), ...options.shape }
@@ -349,10 +472,12 @@ export class GraphError extends Error {
     this.httpStatus = entry.httpStatus
     this.#entry = { ...entry, message }
     this.#details = options.details ?? entry.details
+    this.#extra = options.extra
   }
 
   toBody(fbtraceId: string): GraphErrorBody {
     return {
+      ...this.#extra,
       error: {
         message: renderMessage(this.code, this.#entry, this.#entry.message),
         type: this.#entry.type,
@@ -361,7 +486,7 @@ export class GraphError extends Error {
         ...(this.#entry.errorData
           ? {
               error_data: {
-                messaging_product: 'whatsapp',
+                ...(this.#entry.productInErrorData === false ? {} : { messaging_product: 'whatsapp' }),
                 details: this.#details ?? this.#entry.message,
               },
             }

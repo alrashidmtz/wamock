@@ -45,6 +45,15 @@
 const GRAPH_HOSTS = new Set(['graph.facebook.com', 'graph.instagram.com', 'lookaside.fbsbx.com'])
 
 /**
+ * Marks a request the interceptor redirected, naming the host it was meant
+ * for. The mock then answers URLs on Meta's hosts (a media download on
+ * lookaside.fbsbx.com, `paging.next` on graph.facebook.com), as Meta does,
+ * rather than its own address: the interceptor sends those back to it, and a
+ * client that allows only Meta's hosts accepts them.
+ */
+export const FORWARDED_HOST_HEADER = 'x-wamock-forwarded-host'
+
+/**
  * What `fetch` accepts. Declared here rather than pulled from the DOM lib:
  * wamock targets Node and adding `lib.dom` for one alias would drag in a
  * browser global namespace that does not apply.
@@ -99,7 +108,15 @@ export function installGraphInterceptor(options: InterceptorOptions): () => void
       const url = new URL(input.url)
       if (!hosts.has(url.hostname)) return original(input, init)
       options.onIntercept?.()
-      return original(new Request(redirect(url), input), init)
+      // `init` overrides the Request's own fields first; marked afterwards,
+      // so headers passed in `init` cannot drop the mark. What `init` holds
+      // beyond the request itself (a `dispatcher`, say) still goes to fetch;
+      // its headers and body are in the request already.
+      const request = new Request(redirect(url), init === undefined ? input : new Request(input, init))
+      request.headers.set(FORWARDED_HOST_HEADER, url.hostname)
+      if (init === undefined) return original(request)
+      const { headers: _headers, body: _body, ...fetchOptions } = init
+      return original(request, fetchOptions)
     }
 
     const raw = typeof input === 'string' ? input : input.toString()
@@ -113,7 +130,9 @@ export function installGraphInterceptor(options: InterceptorOptions): () => void
 
     if (!hosts.has(url.hostname)) return original(input, init)
     options.onIntercept?.()
-    return original(redirect(url).toString(), init)
+    const headers = new Headers(init?.headers)
+    headers.set(FORWARDED_HOST_HEADER, url.hostname)
+    return original(redirect(url).toString(), { ...init, headers })
   }
 
   globalThis.fetch = interceptor as typeof globalThis.fetch

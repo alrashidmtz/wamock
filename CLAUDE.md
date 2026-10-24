@@ -75,7 +75,7 @@ run it (after `build`) whenever a change touches what ships.
   leaves as a Meta-shaped body via
   `GraphError` (`src/errors/graph-error.ts`, the error catalogue).
 - **`src/control/routes.ts`** — the `/__mock/*` control API. Bodies are parsed
-  as JSON regardless of content-type (so `curl -d` works) and validated with
+  as JSON regardless of content-type, multipart included (so `curl -d` works) and validated with
   strict zod schemas that reject and name unknown keys. `/__mock/state` is
   built by the typed `buildStateSnapshot()` — internal `Set`/`Map`s must be
   converted there (`JSON.stringify(new Set(...))` is `{}`), and it must never
@@ -90,8 +90,11 @@ run it (after `build`) whenever a change touches what ships.
   5-minute download URL served at `DOWNLOAD_PATH`. A send by media `id` needs
   `mimeTypeOf(id)`: undefined when the id expired or never existed (131009),
   otherwise a type that suits the message kind (131053).
-- **Embedded Signup tenants start unsubscribed**, as with Meta; tests that are
-  not about subscription pass `subscribed: true` or subscribe explicitly.
+- **Embedded Signup tenants start unsubscribed and their number unregistered**
+  (sends fail with 133010 and inbound is refused until `register`), as with
+  Meta; tests that are not about either pass `subscribed: true` /
+  `registered: true` (a verified number only), or take the steps. A
+  coexistence number starts registered.
 - **Coexistence** (`src/graph/coexistence-service.ts`) is reached through
   Embedded Signup (`createSignup({ coexistence: true })`) and gates sends via
   `assertCanSend`/`recordSend` in `MessagingService`. It owns its own timers

@@ -28,9 +28,20 @@ interface CatalogEntry {
   type: string
   subcode: number | undefined
   details: string | undefined
+  /** False where Meta's example leaves `messaging_product` out of error_data. */
+  productInErrorData?: false
 }
 
 const CATALOG: Record<string, CatalogEntry> = {
+  UNKNOWN: {
+    code: 1,
+    httpStatus: 500,
+    retriable: true,
+    message: '(#1) An unknown error occurred',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Invalid request or possible server error.',
+  },
   INVALID_PARAMETER: {
     code: 100,
     httpStatus: 400,
@@ -129,6 +140,82 @@ const CATALOG: Record<string, CatalogEntry> = {
     subcode: undefined,
     details:
       'The variable parameter values included in the request are not using the format specified in the template.',
+  },
+  NOT_VERIFIED: {
+    code: 133006,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#133006) Phone number needs to be verified before registering.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Phone number needs to be verified before registering.',
+  },
+  PIN_INCORRECT: {
+    code: 133005,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#133005) Two-step verification PIN incorrect.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Two-step verification PIN incorrect.',
+  },
+  REGISTRATION_LIMIT: {
+    code: 133016,
+    httpStatus: 400,
+    retriable: false,
+    message:
+      '(#133016) Registration or Deregistration failed because there were too many attempts for this phone number in a short period of time',
+    type: 'OAuthException',
+    subcode: undefined,
+    details:
+      'Registration or Deregistration failed because there were too many attempts for this phone number in a short period of time',
+  },
+  ALREADY_VERIFIED: {
+    code: 136024,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#136024) Phone number is already verified',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Check code_verification_status before requesting a code.',
+  },
+  BLOCK_USERS_FAILED: {
+    code: 139100,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#139100) Failed to block/unblock users',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Failed to block some users, see the block_users response list for details',
+    // Meta's Block Users examples carry `details` alone in error_data.
+    productInErrorData: false,
+  },
+  BLOCKLIST_CHANGED: {
+    code: 139102,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#139102) Blocklist concurrent update',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Occurs when the blocklist is updated while performing a pagination request and version_id does not match.',
+  },
+  PERMISSION_DENIED: {
+    code: 200,
+    httpStatus: 403,
+    retriable: false,
+    message: '(#200) Permissions error',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Permission is either not granted or has been removed.',
+  },
+  BLOCKED_USER: {
+    code: 130403,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#130403) Unable to deliver the message. This business has blocked the end user on WhatsApp',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Unable to deliver the message. This business has blocked the end user on WhatsApp',
   },
   INVALID_PAGINATION_CURSOR: {
     code: 131059,
@@ -254,7 +341,7 @@ describe('every catalogued error renders exactly this body', () => {
       expect(body.error.error_data).toBeUndefined()
     } else {
       expect(body.error.error_data).toEqual({
-        messaging_product: 'whatsapp',
+        ...(entry.productInErrorData === false ? {} : { messaging_product: 'whatsapp' }),
         details: entry.details,
       })
     }

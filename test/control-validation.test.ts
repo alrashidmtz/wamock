@@ -84,6 +84,14 @@ describe('a rejected control-API body says which field is wrong', () => {
     expect(detailOf(res)).toMatch(/typo/)
   })
 
+  it('refuses an advance past the last instant a date can hold, and keeps the clock usable', async () => {
+    const res = await post('/__mock/time/advance', { ms: 9007199254740992 })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error.code).toBe(100)
+    expect(engine.clock.now()).toBe(EPOCH)
+    expect(() => engine.clock.advance(9007199254740992)).toThrow(RangeError)
+  })
+
   it('rejects a negative clock advance without leaking an internal error', async () => {
     const res = await post('/__mock/time/advance', { ms: -1000 })
 
@@ -101,7 +109,7 @@ describe('a rejected control-API body says which field is wrong', () => {
 describe('optional control-API parameters take effect', () => {
   /** The seed hosts one number; a second is minted the documented way. */
   const secondNumber = async (): Promise<string> => {
-    const res = await post('/__mock/embedded-signup', {})
+    const res = await post('/__mock/embedded-signup', { registered: true })
     return (res.json() as { phone_number_id: string }).phone_number_id
   }
 

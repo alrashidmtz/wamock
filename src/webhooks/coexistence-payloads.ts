@@ -87,6 +87,38 @@ export function buildAccountUpdatePayload(options: {
   )
 }
 
+/**
+ * `account_update` for authentication-international rates, as Meta's page
+ * shows both: `AUTH_INTL_PRICE_ELIGIBILITY_UPDATE` with the start times (unix
+ * seconds), and `BUSINESS_PRIMARY_LOCATION_COUNTRY_UPDATE` with the country
+ * Meta determined the business is based in.
+ */
+export function buildAuthInternationalPayload(
+  options: { wabaId: string; timeMs: number } & (
+    | { event: 'AUTH_INTL_PRICE_ELIGIBILITY_UPDATE'; startTime: number; exceptions: Array<{ country: string; startTime: number }> }
+    | { event: 'BUSINESS_PRIMARY_LOCATION_COUNTRY_UPDATE'; country: string }
+  ),
+): WebhookPayload<AccountChange> {
+  const seconds = (ms: number) => Math.floor(ms / 1000)
+  return envelope(
+    options.wabaId,
+    'account_update',
+    options.event === 'AUTH_INTL_PRICE_ELIGIBILITY_UPDATE'
+      ? {
+          auth_international_rate_eligibility: {
+            exception_countries: options.exceptions.map((exception) => ({
+              country_code: exception.country,
+              start_time: seconds(exception.startTime),
+            })),
+            start_time: seconds(options.startTime),
+          },
+          event: options.event,
+        }
+      : { country: options.country, event: options.event },
+    options.timeMs,
+  )
+}
+
 export interface AppContact {
   /** Digits only. */
   phone: string

@@ -44,7 +44,7 @@ export function requirePhoneNumber(
 export function assertToken(
   context: MockContext,
   accessToken: string | undefined,
-  scope?: string,
+  scopes: readonly string[] = [],
 ): void {
   if (accessToken === undefined) return
   if (!context.tokens.isKnown(accessToken)) return
@@ -52,10 +52,10 @@ export function assertToken(
   if (!context.tokens.isValid(accessToken, context.clock.now())) {
     throw new GraphError(ERROR_CODES.TOKEN_EXPIRED)
   }
-  if (scope !== undefined && !context.tokens.hasScope(accessToken, scope)) {
-    throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-      message: 'Permissions error',
-      details: `The access token does not have the required permission: ${scope}`,
+  const missing = scopes.filter((scope) => !context.tokens.hasScope(accessToken, scope))
+  if (missing.length > 0) {
+    throw new GraphError(ERROR_CODES.PERMISSION_DENIED, {
+      details: `The access token does not have the required permission: ${missing.join(', ')}`,
     })
   }
 }

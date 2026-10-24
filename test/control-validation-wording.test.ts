@@ -85,7 +85,9 @@ const CASES: [string, unknown, string][] = [
  */
 const STILL_ACCEPTED: [string, unknown][] = [
   ['/__mock/scenario', { seed: 9007199254740992 }],
-  ['/__mock/time/advance', { ms: 9007199254740992 }],
+  // `/__mock/time/advance {ms: 9007199254740992}` was here too. It is now
+  // refused: it moved the clock past the last instant a Date can hold, after
+  // which every send failed on an Invalid Date, even across a reset.
 ]
 
 describe('bodies 0.3.1 accepted are still accepted', () => {

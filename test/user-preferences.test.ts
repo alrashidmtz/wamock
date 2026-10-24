@@ -116,7 +116,7 @@ describe('user_preferences', () => {
 
   it('is kept per business phone number', async () => {
     const { e, statusesOf, flush } = harness()
-    const other = e.createSignup({ businessId: e.state.defaultBusinessId, subscribed: true }).phone_number_id
+    const other = e.createSignup({ businessId: e.state.defaultBusinessId, subscribed: true, registered: true }).phone_number_id
     e.createTemplate(e.state.waba(e.state.phoneNumber(other)!.wabaId)!.wabaId, {
       name: 'promo',
       language: 'es_MX',

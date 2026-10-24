@@ -167,6 +167,21 @@ number gets 1,000 free service messages a month (`free_customer_service`), and
 the 1,001st is `regular`, billable. Templates are always `regular`, utility
 included.
 
+An **authentication** template can bill as `authentication_international`:
+to a user in one of the 18 markets with that rate, once your portfolio is
+eligible and past its start time for that country, and never in the country
+your business is based in. (Kazakhstan shares +7 with Russia, which wamock
+reads as Russia, so a Kazakh number bills as `authentication`.) Meta announces
+both on `account_update`
+(`AUTH_INTL_PRICE_ELIGIBILITY_UPDATE`, `BUSINESS_PRIMARY_LOCATION_COUNTRY_UPDATE`)
+and on `GET /{waba_id}?fields=auth_international_rate_eligibility,primary_business_location`.
+`POST /__mock/auth-international` plays Meta deeming you eligible:
+
+```bash
+curl -X POST localhost:4004/__mock/auth-international \
+  -d '{"start_time":1767225600,"primary_business_location":"MX"}'
+```
+
 A customer who writes in from a **Click-to-WhatsApp ad** changes the picture:
 your reply inside the service window opens a 7-day free entry point window in
 which everything is free, marketing included (`type: "free_entry_point"`), and
@@ -457,6 +472,8 @@ right: report it as a fidelity bug.
 | `GET /{version}/{media_id}` | `{url, mime_type, sha256, file_size, id}`; a fresh URL each time, valid 5 minutes; optional `phone_number_id` |
 | `GET <media url>` | the bytes, with a bearer token; 404 once the URL has expired |
 | `DELETE /{version}/{media_id}` | `{success: true}`; optional `phone_number_id` |
+| `POST` · `DELETE /{version}/{phone_number_id}/block_users` | block or unblock `{messaging_product, block_users:[{user}]}` (at most 1,000): only customers who wrote in the last 24h can be blocked; per-user `failed_users` beside Meta's `139100`. A message to a blocked customer fails on its status with `130403`, and nothing comes in from them |
+| `GET /{version}/{phone_number_id}/block_users` | the blocked customers, paged with `limit`, `after`, `before` |
 
 Graph routes take JSON, `application/x-www-form-urlencoded` (nested objects as
 JSON-valued fields, as Meta reads them) and, for media, `multipart/form-data`.
@@ -481,7 +498,9 @@ Graph routes read a body as what it is labelled, as Meta does.
 | `POST /__mock/templates/{name}/{language}/transition` | `{to}` — `APPROVED\|REJECTED\|PAUSED\|PENDING\|DISABLED`; optional `?waba_id=` | play Meta's reviewer; a pause lifts after 3h, then 6h, and the third disables |
 | `POST /__mock/templates/{name}/{language}/recategorize` | `{to, notice?}` — `UTILITY\|MARKETING\|AUTHENTICATION`; optional `?waba_id=` | Meta's automated recategorization: notice now, change in 24h |
 | `POST /__mock/scenario` | `{seed?, latencyMs?, sendFailureRate?, webhookFailureRate?, duplicateWebhooks?, outOfOrderStatuses?, nextError?:{code,times?}}` | latency, failure rates, duplication, ordering |
-| `POST /__mock/embedded-signup` | `{subscribed?, business_id?, coexistence?}` | mint a signup code; the WABA starts unsubscribed, as with Meta (`subscribed: true` skips that step); optionally under an existing business portfolio |
+| `POST /__mock/embedded-signup` | `{subscribed?, registered?, phone?, business_id?, coexistence?}` | mint a signup code; the WABA starts unsubscribed and its number unregistered, as with Meta (`subscribed: true` and `registered: true` skip those steps). An unregistered number neither sends (`133010`) nor receives: `/__mock/inbound` to it is refused. `phone` is how the customer finished: `verified` (default), `unverified` (which `registered: true` cannot register: it must be verified first) or `none` (no `phone_number_id`). A `coexistence` number is already registered. Optionally under an existing business portfolio |
+| `POST /__mock/auth-international` | `{business_id?, start_time?, exception_countries?:[{country_code, start_time}], primary_business_location?}` (unix seconds; start 30 days out by default) | Meta deems the portfolio eligible for authentication-international rates, and says so on `account_update` |
+| `GET /__mock/verification-code?phone_number_id=` | — | the code `request_code` "sent" to a number, as its SMS would read (`mock.verificationCode(id)` in a test) |
 | `POST /__mock/tokens` | `{kind?, scopes?}` — `permanent\|short\|long` | mint a token to exercise expiry and missing scopes |
 | `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN\|UNKNOWN`; optional `phone_number_id` | change a number's quality rating, silently (see below) |
 | `POST /__mock/tier` | `{tier}` — `TIER_250\|TIER_2K\|TIER_10K\|TIER_100K\|TIER_UNLIMITED`, or wamock's `TIER_1\|TIER_2`; optional `phone_number_id` | set the messaging limit of that number's business portfolio; announces `business_capability_update` |
@@ -505,6 +524,9 @@ that breaks and that no other mock covers.
 | `POST /{version}/{waba_id}/subscribed_apps` | without it, webhooks never arrive; `override_callback_uri` (at most 200 characters) + `verify_token` send this WABA's webhooks elsewhere, after the handshake. Only the fields Meta lets an override take (`messages`, the coexistence fields…) follow it; template and account webhooks stay on the app's URL |
 | `GET /{version}/{waba_id}/subscribed_apps` | list subscriptions, with `override_callback_uri` when set |
 | `DELETE /{version}/{waba_id}/subscribed_apps` | unsubscribe; deliveries stop at once |
+| `POST /{version}/{waba_id}/phone_numbers` | `{cc, phone_number, verified_name}`: a new, unverified number → `{id}` |
+| `POST /{version}/{phone_number_id}/request_code` · `verify_code` | `code_method` (`SMS`\|`VOICE`) and `language`, then `code`, in the query or the body; `136024` for a number already verified |
+| `POST /{version}/{phone_number_id}/register` · `deregister` | `{messaging_product, pin}`: the first PIN becomes the number's (`133005` after); `133006` until verified; 10 calls per 72h (`133016`). A coexistence number cannot be deregistered |
 | `GET /{version}/{waba_id}/phone_numbers` | every number on the WABA, as Embedded Signup's last step reads them: `verified_name`, `display_phone_number`, `id`, `quality_rating` by default, or `?fields=`; newest first, or oldest with `sort=['last_onboarded_time_ascending']` / `last_onboarded_time.asc`; paged with `limit`, `after`, `before` |
 | `GET /{version}/{phone_number_id}?fields=` | by default `id`, `display_phone_number`, `verified_name`, `quality_rating`; also `status`, `name_status`, `unified_cert_status`, `code_verification_status`, `account_mode`, `host_platform`, `platform_type`, `is_on_biz_app`, `country_code`, `country_dial_code`, `is_official_business_account`, `whatsapp_business_manager_messaging_limit` (and the deprecated `messaging_limit_tier`, same value), `webhook_configuration` |
 | `POST /{version}/{phone_number_id}` | `webhook_configuration: {override_callback_uri, verify_token}`: the number's own callback URL, ahead of its WABA's; `""` removes it. Needs the WABA subscribed. The other settings this call takes in production are not emulated |
@@ -525,7 +547,7 @@ Embedded Signup tells the partner about the new customer with `account_update`
 `PARTNER_ADDED`. That field is the partner's own, so it arrives before the
 partner subscribes to the customer's WABA; nothing else does.
 
-**The four scenarios worth reproducing:**
+**The five scenarios worth reproducing:**
 
 1. **The Graph Explorer token.** Someone pastes a ~2h token into your connect
    form. It works. Two hours later every send is a 401 and nothing says why.
@@ -535,16 +557,26 @@ partner subscribes to the customer's WABA; nothing else does.
    ```
 2. **The unsubscribed WABA.** The number connects, the dashboard looks correct,
    and inbound messages simply never arrive — no error anywhere. Every signup
-   starts this way, as with Meta, until your code subscribes:
+   starts this way, as with Meta, until your code subscribes (`registered:
+   true` sets aside the next scenario, so this one is all you see):
    ```bash
-   curl -X POST localhost:4004/__mock/embedded-signup -d '{}'
+   curl -X POST localhost:4004/__mock/embedded-signup -d '{"registered":true}'
    curl -X POST localhost:4004/v26.0/$WABA_ID/subscribed_apps
    ```
-3. **Cross-signing.** You host numbers for your own app *and* for customers who
+3. **The unregistered number.** Embedded Signup verifies the customer's
+   number but never registers it: that is your step, and until you take it
+   every send fails with `133010`. A customer can also finish with an
+   unverified number, or none (`phone: "unverified"` / `"none"`), and then
+   your code creates, verifies and registers it:
+   ```bash
+   curl -X POST localhost:4004/v26.0/$PHONE_NUMBER_ID/register \
+     -H 'content-type: application/json' -d '{"messaging_product":"whatsapp","pin":"123456"}'
+   ```
+4. **Cross-signing.** You host numbers for your own app *and* for customers who
    bring their own. Verifying everything with one secret works right up until
    the second app exists. wamock signs each tenant's webhooks with that
    tenant's secret.
-4. **Asynchronous template approval.** Approval lands hours later as a
+5. **Asynchronous template approval.** Approval lands hours later as a
    `message_template_status_update` webhook, never as a response to your
    submission. Integrations that only react to their own calls never see it.
 
@@ -616,13 +648,16 @@ you its result.
 | `131026` | recipient cannot receive | no |
 | `131050` | the customer stopped your marketing — on the **status**, not the send | no |
 | `132000` | template parameters do not match its placeholders | no |
+| `133005` / `133006` / `133016` | `register` with the wrong PIN, before verifying, or more than 10 times in 72h | no |
+| `130403` | a message to a customer the business blocked — on the **status**, not the send | no — unblock them first |
+| `139100` | some users in a block or unblock request could not be; the per-user errors (`131047`, `131021`, `139101`) come beside it | no |
 | `131059` | listing templates with a `before`/`after` cursor that names no template (v24+). Meta documents the code but not its message; wamock's restates the changelog | no — retry without the cursor |
 | `132012` | a template parameter's value is not in the form its type needs | no |
 | `132018` | Meta's catch-all for invalid template parameters; wamock answers the specific `132000`/`132012`, and gives `132018` its wording when a scenario forces it | no |
 | `131053` | media of a type that kind of message cannot carry (on the send), or a `link` that is not http(s) (on the **status**) | no |
 | `131009` | parameter value not valid: a media id nobody uploaded or past its 30 days, a reaction to a message it cannot react to, marking an unknown message as read, a BSUID from another portfolio | no |
 | `131062` | sending an authentication template to a BSUID | no — use the phone number |
-| `133010` | a coexistence number that was disconnected or is offboarded | no — the business must reconnect |
+| `133010` | sending from a number not registered on Cloud API: after Embedded Signup until your code calls `register`, after `deregister`, or a coexistence number that was disconnected or offboarded | no — register it, or the business reconnects |
 | `2593107` / `2593108` | `smb_app_data` called twice, or 24h or more after onboarding | no — offboard and onboard again |
 | `131048` | spam / quality rate limit, or the portfolio's messaging limit | yes, with backoff |
 | `130429` | throughput rate limit | yes |
@@ -630,8 +665,10 @@ you its result.
 | `190` / `0` | token expired or invalid | no — re-auth |
 | `131000` | transient Meta-side failure | yes |
 
-Each returns Meta's real HTTP status too: `429` for `130429`, `401` for `190`,
-`400` for the rest. Token errors (`190`, `0`) carry no `(#code)` prefix in their
+Each returns Meta's real HTTP status too: `429` for `130429`, `401` for `190`
+and `0`, `403` for a missing permission (`200`), `422` when an override
+callback fails its handshake, `500` for `131000` and for a fault in wamock
+itself (`1`), `400` for the rest. Token errors (`190`, `0`) carry no `(#code)` prefix in their
 message, unlike every messaging error, so a log parser keyed on `(#190)` never
 sees an expired token.
 

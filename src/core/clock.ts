@@ -22,6 +22,9 @@ export interface Clock {
   advance(ms: number): void
 }
 
+/** The last instant a JavaScript Date can hold (ECMA-262, 8.64e15 ms). */
+export const LAST_INSTANT_MS = 8.64e15
+
 export interface VirtualClockOptions {
   /**
    * `frozen` — time only moves via `advance()`. This is the mode for tests and
@@ -89,7 +92,11 @@ export class VirtualClock implements Clock {
   }
 
   advance(ms: number): void {
-    if (ms < 0) throw new RangeError('Clock.advance() cannot take a negative duration')
+    if (!Number.isFinite(ms) || ms < 0) throw new RangeError('Clock.advance() takes a finite, non-negative duration')
+    // Past this, every timestamp the mock writes would be an Invalid Date.
+    if (this.now() + ms > LAST_INSTANT_MS) {
+      throw new RangeError('Clock.advance() would pass the last instant a Date can hold')
+    }
     this.#drainUntil(this.now() + ms)
   }
 

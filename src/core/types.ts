@@ -15,6 +15,13 @@ export interface App {
 export interface Business {
   businessId: string
   messagingTier: MessagingTier
+  /**
+   * Set once Meta deems the portfolio eligible for authentication-
+   * international rates: when they start (ms), and any per-country start.
+   */
+  authInternational?: { startTime: number; exceptions: Array<{ country: string; startTime: number }> }
+  /** The country Meta determined the business is based in (ISO alpha-2). */
+  primaryLocation?: string
 }
 
 /** A WhatsApp Business Account. Belongs to exactly one app and one business portfolio. */
@@ -69,6 +76,14 @@ export interface PhoneNumber {
    */
   displayPhoneNumber: string
   qualityRating?: QualityRating
+  /** The display name it was created with; wamock's default when unset. */
+  verifiedName?: string
+  /** `UNVERIFIED` until `verify_code` passes; verified when unset. */
+  verification?: 'VERIFIED' | 'UNVERIFIED'
+  /** False until `register` (or after `deregister`): it cannot send. Registered when unset. */
+  registered?: boolean
+  /** The two-step verification PIN the first `register` set. */
+  pin?: string
   /**
    * Set with `POST /{phone_number_id}` and `webhook_configuration`: this
    * number's webhooks go here, ahead of its WABA's override and the app's URL.

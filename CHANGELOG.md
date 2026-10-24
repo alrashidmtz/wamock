@@ -4,6 +4,92 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.6.0] — 2026-10-24
+
+### Breaking
+
+- **A number from Embedded Signup starts unregistered.** Signup verifies the
+  customer's number; registering it is the partner's step, and until then
+  every send fails with `133010`, as in production. Call `POST
+  /{phone_number_id}/register` as your code does, or pass `registered: true`
+  to `createSignup` / `/__mock/embedded-signup` for a test that is not about
+  registration. A Business app (coexistence) number is already registered.
+  An unregistered number receives nothing either: `/__mock/inbound` refuses
+  it.
+
+### Added
+
+- **Registering a number, the partner's step.** `POST /{waba_id}/phone_numbers`
+  (a new, unverified number), `request_code`, `verify_code`, `register` and
+  `deregister`, as Meta's "Registering business phone numbers" describes:
+  `133006` before verifying, the first PIN becomes the number's (`133005`
+  after), 10 register/deregister calls per 72 hours (`133016`), `136024` for
+  a code requested for a verified number, and a coexistence number cannot be
+  deregistered. A test reads the code "sent" with `mock.verificationCode()` or
+  `GET /__mock/verification-code`. `GET /{phone_number_id}` reports the real
+  `code_verification_status` and `verified_name`.
+- **Embedded Signup finishes as Meta's does since v3:** with a verified
+  number, an unverified one, or none (`phone: "unverified"` / `"none"`, which
+  answers no `phone_number_id`).
+- **Authentication-international rates.** An authentication template to a
+  user in one of the 18 markets on Meta's page bills as
+  `authentication_international` once the portfolio is eligible, past its
+  start time (or its country's exception), and the user is not in the country
+  the business is based in; each market counts only from its launch (the last
+  nine on October 1, 2026). `POST /__mock/auth-international` plays Meta
+  deeming a portfolio eligible, with `account_update`
+  `AUTH_INTL_PRICE_ELIGIBILITY_UPDATE` and
+  `BUSINESS_PRIMARY_LOCATION_COUNTRY_UPDATE`, and `GET /{waba_id}` answers
+  `auth_international_rate_eligibility` and `primary_business_location`. Meta
+  spells the category with an underscore in its payload example and a hyphen
+  in one list; wamock follows the example. Kazakhstan shares +7 with Russia,
+  so a Kazakh number is not told apart.
+- **The Block Users API.** `POST`, `DELETE` and `GET
+  /{phone_number_id}/block_users`, as Meta's "Block users" page describes
+  them: only a customer who wrote in the last 24 hours can be blocked, at most
+  1,000 a request and 64,000 in all, and a request where some users fail
+  answers them one by one in `failed_users` (`131047`, `131021` for the
+  business's own number, `139101`) beside a top-level `139100`. A message to
+  a blocked customer is accepted and fails on its status with `130403`, as
+  integrators report it, unbilled; a blocked customer's message never
+  arrives, so `/__mock/inbound` refuses it. Not documented by Meta, and
+  inferred: the HTTP status of a partly failed request (400, since its body
+  carries an `error`), and that unblocking needs no recent message (a
+  blocked customer cannot write, so it would make every block permanent).
+
+### Fixed
+
+- **A missing permission answers Graph's `(#200) Permissions error`, HTTP
+  403**, as Meta's error code reference (200-299) and its registration page
+  give it. 0.5.0 answered `(#100)` with a 400. Registering and deregistering
+  need both `whatsapp_business_management` and `whatsapp_business_messaging`.
+- **A fault inside wamock answers HTTP 500, code 1,** with `wamock internal
+  error: …` in its details. Every error that was not a Graph error used to be
+  rendered `(#100) Invalid parameter`, so a bug in the mock read as a mistake
+  in the request. A body that cannot be read is still Graph's 100, and so is
+  an out-of-range scenario value on the control API.
+- **The control API reads a multipart body as JSON too**, as it does every
+  other content type; it answered "Malformed multipart/form-data body".
+- **A JSON request with no body is read as no parameters.** Meta's examples
+  call `request_code`, `verify_code` and `deregister` with a query alone, and
+  clients that still send `content-type: application/json` got a 400.
+- **Inputs that broke the mock are refused as the caller's 100:** a query
+  parameter given twice (a repeated `access_token` used to skip the token
+  check), a template component that is not an object, a Host header that is
+  no host, and a clock advance past the last instant a date can hold (it left
+  every later send failing on an Invalid Date, even after a reset).
+- **A token in the `access_token` parameter is checked** like one in the
+  Authorization header. Only the header was read, so a token in the query
+  went unchecked: an expired one passed, and a tenant's token reached another
+  tenant.
+- **Through the interceptor, wamock hands out Meta's URLs.** A media URL from
+  `GET /{media_id}` pointed at the mock's own address, and so did
+  `paging.next`; a client that allows only Meta's hosts (an SSRF guard on
+  downloads) refused them. Intercepted requests now get
+  `lookaside.fbsbx.com` and `graph.facebook.com`, which the interceptor routes
+  back to the mock. Without the interceptor, the mock's own address, which is
+  the one that works.
+
 ## [0.5.0] — 2026-10-24
 
 **A field-by-field audit against Meta's current references, done with Codex

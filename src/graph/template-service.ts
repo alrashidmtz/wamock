@@ -1,5 +1,5 @@
 import type { MockContext } from '../core/context.js'
-import { isRecord } from '../core/values.js'
+import { isRecord, textOf } from '../core/values.js'
 import type { PricingCategory } from '../core/pricing.js'
 import { requireWaba } from '../core/guards.js'
 import {
@@ -39,6 +39,13 @@ export interface TemplateListOptions extends PageOptions {
   /** Where `paging.next` and `previous` point: the mock's address over HTTP. */
   baseUrl?: string
   version?: string
+}
+
+/** A numeric template id no other object holds, so no two records share one. */
+function freshTemplateId(state: MockContext['state']): string {
+  let id = String(state.nextSeq() + 1_000_000_000_000_000)
+  while (state.isIdTaken(id)) id = String(state.nextSeq() + 1_000_000_000_000_000)
+  return id
 }
 
 /** Templates per page when the call sets no `limit`. */
@@ -175,7 +182,7 @@ export class TemplateService {
     }
 
     const template: Template = {
-      id: String(state.nextSeq() + 1_000_000_000_000_000),
+      id: freshTemplateId(state),
       wabaId,
       name,
       language,
@@ -451,8 +458,14 @@ export class TemplateService {
       })
     }
 
-    assertParameters(template, spec['components'])
-    assertCouponCodes(spec['components'])
+    // Each component must be an object before anything reads its fields: a
+    // malformed send is the caller's 100, not a fault in the mock.
+    const sent = spec['components']
+    if (sent !== undefined && (!Array.isArray(sent) || !sent.every(isRecord))) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param template[components] must be an array of objects' })
+    }
+    assertParameters(template, sent)
+    assertCouponCodes(sent)
     return toPricingCategory(template.category)
   }
 }
@@ -545,15 +558,15 @@ function assertParameters(template: Template, sent: unknown): void {
   for (const kind of ['header', 'body'] as const) {
     const defined = template.components.find(
       (c): c is Record<string, unknown> =>
-        typeof c === 'object' && c !== null && String((c as Record<string, unknown>)['type']).toLowerCase() === kind,
+        typeof c === 'object' && c !== null && textOf((c as Record<string, unknown>)['type']).toLowerCase() === kind,
     )
     // A media header (IMAGE, VIDEO, DOCUMENT…) takes its media as a parameter
     // and has no text placeholders to count; only a TEXT header is checked.
-    if (kind === 'header' && defined && defined['format'] !== undefined && String(defined['format']).toUpperCase() !== 'TEXT') {
+    if (kind === 'header' && defined && defined['format'] !== undefined && textOf(defined['format']).toUpperCase() !== 'TEXT') {
       continue
     }
     const expected = defined ? placeholdersOf(defined['text']) : new Set<string>()
-    const supplied = sentComponents.find((c) => String(c['type']).toLowerCase() === kind)
+    const supplied = sentComponents.find((c) => textOf(c['type']).toLowerCase() === kind)
     const parameters = Array.isArray(supplied?.['parameters']) ? (supplied['parameters'] as Array<Record<string, unknown>>) : []
 
     // Named: the exact set of names, each once. Comparing counts and checking

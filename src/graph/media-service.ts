@@ -135,7 +135,7 @@ export class MediaService {
       throw invalid(`File is ${file.bytes.length} bytes; ${type} is limited to ${limit} bytes`)
     }
 
-    const id = makeMediaId(state.nextSeq())
+    const id = this.#freshId()
     this.#media.set(id, {
       id,
       phoneNumberId,
@@ -153,11 +153,23 @@ export class MediaService {
    * ids from webhooks do. Returns the fields the inbound message carries.
    */
   receive(phoneNumberId: string, mimeType: string, bytes: Buffer): { id: string; sha256: string; url: string } {
-    const { clock, state } = this.#context
-    const id = makeMediaId(state.nextSeq())
+    const { clock } = this.#context
+    const id = this.#freshId()
     const sha256 = sha256Of(bytes)
     this.#media.set(id, { id, phoneNumberId, mimeType, bytes, sha256, uploadedAt: clock.now(), ttlMs: RECEIVED_MEDIA_TTL_MS })
     return { id, sha256, url: this.get(id)['url'] as string }
+  }
+
+  /**
+   * A numeric id no other object holds: a media id that matched a number's or
+   * a WABA's would let that owner's token reach these bytes.
+   */
+  #freshId(): string {
+    const { state } = this.#context
+    let id = makeMediaId(state.nextSeq())
+    while (state.isIdTaken(id) || this.#media.has(id)) id = makeMediaId(state.nextSeq())
+    state.reserveId(id)
+    return id
   }
 
   /** The number that uploaded or received this media, while it lives. */

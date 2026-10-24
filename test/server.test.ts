@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { buildStateSnapshot } from '../src/control/routes.js'
 import { WamockEngine } from '../src/core/engine.js'
@@ -400,5 +400,101 @@ describe('the media download URL', () => {
     const res = await app.inject({ method: 'GET', url: url.pathname + url.search, headers: { authorization: `Bearer ${token}` } })
     expect(res.statusCode).toBe(401)
     expect(res.json().error.code).toBe(190)
+  })
+})
+
+describe('errors that are not Meta’s', () => {
+  it('answers a fault inside wamock 500, named as wamock’s, never as a 100 the request earned', async () => {
+    vi.spyOn(engine, 'listTemplates').mockImplementation(() => {
+      throw new TypeError('boom')
+    })
+    const res = await app.inject({ method: 'GET', url: `/v26.0/${engine.state.defaultWabaId}/message_templates` })
+    expect(res.statusCode).toBe(500)
+    expect(res.json().error).toMatchObject({ code: 1, error_data: { details: 'wamock internal error: boom' } })
+  })
+
+  it('refuses a query parameter given twice, a repeated access_token included', async () => {
+    const pnid = engine.state.defaultPhoneNumberId
+    for (const query of ['fields=id&fields=quality_rating', 'access_token=a&access_token=b']) {
+      const res = await app.inject({ method: 'GET', url: `/v26.0/${pnid}?${query}` })
+      expect([res.statusCode, res.json().error.code], query).toEqual([400, 100])
+    }
+  })
+
+  it('refuses a template component that is not an object as the caller’s 100', async () => {
+    engine.createTemplate(engine.state.defaultWabaId, { name: 'hello', language: 'es_MX', category: 'UTILITY', components: [{ type: 'BODY', text: 'Hola {{1}}' }] })
+    engine.transitionTemplate(engine.state.defaultWabaId, 'hello', 'es_MX', 'APPROVED')
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v26.0/${engine.state.defaultPhoneNumberId}/messages`,
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ messaging_product: 'whatsapp', to: '5215555000001', type: 'template', template: { name: 'hello', language: { code: 'es_MX' }, components: [null] } }),
+    })
+    expect([res.statusCode, res.json().error.code]).toEqual([400, 100])
+  })
+
+  it('refuses a Host header that is no host as the caller’s 100', async () => {
+    const { id } = engine.uploadMedia(engine.state.defaultPhoneNumberId, { messaging_product: 'whatsapp', type: 'image/png', file: { bytes: Buffer.from('x') } })
+    const res = await app.inject({ method: 'GET', url: `/v26.0/${id}`, headers: { host: '[' } })
+    expect([res.statusCode, res.json().error.code]).toEqual([400, 100])
+  })
+
+  it('reads a type that is not text as no type, never running the body’s own toString', async () => {
+    engine.createTemplate(engine.state.defaultWabaId, { name: 'hello', language: 'es_MX', category: 'UTILITY', components: [{ type: 'BODY', text: 'Hola {{1}}' }] })
+    engine.transitionTemplate(engine.state.defaultWabaId, 'hello', 'es_MX', 'APPROVED')
+    const poisoned = { toString: null }
+    for (const components of [[{ type: poisoned }], [{ type: 'body', parameters: [{ type: poisoned }] }], [{ type: 'header', parameters: [{ type: poisoned }] }]]) {
+      const res = await app.inject({
+        method: 'POST',
+        url: `/v26.0/${engine.state.defaultPhoneNumberId}/messages`,
+        headers: { 'content-type': 'application/json' },
+        payload: JSON.stringify({ messaging_product: 'whatsapp', to: '5215555000001', type: 'template', template: { name: 'hello', language: { code: 'es_MX' }, components } }),
+      })
+      expect(res.statusCode, JSON.stringify(components)).toBe(400)
+      expect(res.json().error.code).not.toBe(1)
+    }
+  })
+
+  it('answers a drain that hit the clock’s iteration cap 500, with Graph’s body', async () => {
+    const forever = () => {
+      engine.clock.at(engine.clock.now(), forever)
+    }
+    engine.clock.at(engine.clock.now(), forever)
+    const res = await app.inject({ method: 'POST', url: '/__mock/time/advance', payload: '{"ms":0}' })
+    expect(res.statusCode).toBe(500)
+    expect(res.json().error).toMatchObject({ code: 1, fbtrace_id: expect.any(String) })
+    expect(res.json().error.error_data.details).toMatch(/timer iterations/)
+  })
+
+  it('reads an empty JSON body as no parameters, as Meta’s query-only calls send it', async () => {
+    const { phone_number_id: pnid } = engine.createSignup({ phone: 'unverified' })
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v26.0/${pnid}/request_code?code_method=SMS&language=en_US`,
+      headers: { 'content-type': 'application/json' },
+    })
+    expect(res.json()).toEqual({ success: true })
+  })
+
+  it('keeps Fastify’s guard against a __proto__ key in a JSON body', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v26.0/${engine.state.defaultPhoneNumberId}/messages`,
+      headers: { 'content-type': 'application/json' },
+      payload: '{"__proto__":{"polluted":true},"messaging_product":"whatsapp"}',
+    })
+    expect(res.statusCode).toBe(400)
+    expect(({} as Record<string, unknown>)['polluted']).toBeUndefined()
+  })
+
+  it('still answers a body it could not read with Graph’s 100', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v26.0/${engine.state.defaultPhoneNumberId}/messages`,
+      headers: { 'content-type': 'application/json' },
+      payload: '{not json',
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error.code).toBe(100)
   })
 })

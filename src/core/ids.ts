@@ -29,3 +29,16 @@ export function makeFbtraceId(seq: number): string {
 export function makeMediaId(seq: number): string {
   return String(1_000_000_000_000_000n + BigInt(seq))
 }
+
+/**
+ * `base`, or `base_2`, `base_3`… if something already claimed it. A generated
+ * id must never land on one a test registered by hand: registering it again
+ * would overwrite that WABA or number, and a shared portfolio id would make
+ * the tenant share someone else's messaging limit.
+ */
+export function freshId(base: string, taken: (id: string) => boolean): string {
+  if (!taken(base)) return base
+  let n = 2
+  while (taken(`${base}_${n}`)) n++
+  return `${base}_${n}`
+}

@@ -52,7 +52,40 @@ describe('installGraphInterceptor', () => {
 
     expect(capturedUrl).toBe('http://127.0.0.1:4004/v19.0/PNID_1?fields=display_phone_number')
     expect(capturedInit?.method).toBe('GET')
-    expect((capturedInit?.headers as Record<string, string>)['Authorization']).toBe('Bearer t')
+    const headers = new Headers(capturedInit?.headers)
+    expect(headers.get('authorization')).toBe('Bearer t')
+    // Marked, so the mock answers URLs on Meta's hosts.
+    expect(headers.get('x-wamock-forwarded-host')).toBe('graph.facebook.com')
+  })
+
+  it('keeps its mark on a Request whose headers init replaces', async () => {
+    let captured: Request | undefined
+    restore = installGraphInterceptor({
+      baseUrl: 'http://127.0.0.1:4004',
+      fetchImpl: async (input) => {
+        captured = input as Request
+        return new Response('{}')
+      },
+    })
+    await globalThis.fetch(new Request('https://graph.facebook.com/v26.0/123', { headers: { 'x-a': '1' } }), {
+      headers: { Authorization: 'Bearer t' },
+    })
+    expect(captured!.headers.get('authorization')).toBe('Bearer t')
+    expect(captured!.headers.get('x-wamock-forwarded-host')).toBe('graph.facebook.com')
+  })
+
+  it('passes fetch’s own options, such as a dispatcher, along with a Request', async () => {
+    let captured: RequestInit | undefined
+    restore = installGraphInterceptor({
+      baseUrl: 'http://127.0.0.1:4004',
+      fetchImpl: async (_input, init) => {
+        captured = init
+        return new Response('{}')
+      },
+    })
+    const dispatcher = { kind: 'agent' }
+    await globalThis.fetch(new Request('https://graph.facebook.com/v26.0/123'), { dispatcher, headers: { Authorization: 'Bearer t' } } as unknown as RequestInit)
+    expect((captured as { dispatcher?: unknown } | undefined)?.dispatcher).toBe(dispatcher)
   })
 
   it('leaves every other host alone', async () => {

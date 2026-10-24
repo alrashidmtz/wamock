@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { WamockEngine } from '../../src/core/engine.js'
 import { MockState } from '../../src/core/state.js'
 
 describe('MockState — default seed', () => {
@@ -159,5 +160,31 @@ describe('MockState — sequence and reset', () => {
       sentAt: 0,
     })
     expect(state.outbound()).toHaveLength(0)
+  })
+})
+
+describe('one id space, whoever picks the id', () => {
+  it('refuses an id another kind of object holds, and lets the same object update', () => {
+    const e = new WamockEngine({ appSecret: 's', mode: 'frozen', start: 1_750_000_000_000 })
+    const { state } = e
+    const { id: mediaId } = e.uploadMedia(state.defaultPhoneNumberId, { messaging_product: 'whatsapp', type: 'image/png', file: { bytes: Buffer.from('x') } })
+    expect(() => state.registerPhoneNumber({ phoneNumberId: mediaId, wabaId: state.defaultWabaId, displayPhoneNumber: '15550002222' })).toThrow(/media/)
+    expect(() => state.registerPhoneNumber({ phoneNumberId: state.defaultWabaId, wabaId: state.defaultWabaId, displayPhoneNumber: '15550002222' })).toThrow(/waba/)
+    // The same number again is an update.
+    const number = state.phoneNumber(state.defaultPhoneNumberId)!
+    expect(() => state.registerPhoneNumber({ ...number, qualityRating: 'YELLOW' })).not.toThrow()
+    expect(state.phoneNumber(state.defaultPhoneNumberId)?.qualityRating).toBe('YELLOW')
+
+    const template = (id: string, name: string) => ({
+      id, wabaId: state.defaultWabaId, name, language: 'es_MX', category: 'UTILITY' as const, status: 'APPROVED' as const,
+      parameterFormat: 'POSITIONAL' as const, components: [], pauses: 0,
+    })
+    state.putTemplate(template('T1', 'a'))
+    expect(() => state.putTemplate(template('T1', 'b'))).toThrow(/template/)
+    expect(() => state.putTemplate({ ...template('T1', 'a'), status: 'PAUSED' })).not.toThrow()
+  })
+
+  it('refuses options that give a number and its WABA one id', () => {
+    expect(() => new WamockEngine({ appSecret: 's', mode: 'frozen', phoneNumberId: 'SAME', wabaId: 'SAME' })).toThrow(/SAME/)
   })
 })
