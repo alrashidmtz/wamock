@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import type { MockContext } from '../core/context.js'
 import { requirePhoneNumber, requireWaba } from '../core/guards.js'
 import { freshId } from '../core/ids.js'
+import { includesCallingCode } from '../core/national-lengths.js'
 import { normalizeWaId } from '../core/phone.js'
 import type { PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
@@ -46,16 +47,14 @@ export class RegistrationService {
     }
     const code = (cc as string).trim()
     const digits = (number as string).replace(/[\s()+-]/g, '')
-    // "The phone number, with or without the country calling code." A number
-    // that starts with its calling code is read as including it, as in
-    // Meta's example (`cc: "1"`, `"14195551518"`). That is ambiguous where a
-    // national number can start with the code (a Brazilian `55…`), and telling
-    // them apart takes each country's numbering plan, a library wamock does
-    // not ship; such a number is written with its calling code to be safe.
-    const full = digits.startsWith(code) ? digits : `${code}${digits}`
-    if (!/^\d{1,3}$/.test(code) || !/^\d+$/.test(digits) || normalizeWaId(full) === null) {
-      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param cc and phone_number must form a valid phone number' })
-    }
+    const invalid = () =>
+      new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param cc and phone_number must form a valid phone number' })
+    // The format first: only digits reach the length table.
+    if (!/^\d{1,3}$/.test(code) || !/^\d+$/.test(digits)) throw invalid()
+    // "The phone number, with or without the country calling code": which
+    // one, the national number lengths decide (see includesCallingCode).
+    const full = includesCallingCode(code, digits) ? digits : `${code}${digits}`
+    if (normalizeWaId(full) === null) throw invalid()
     const id = freshId(`PNID_${state.nextSeq()}`, (taken) => state.isIdTaken(taken))
     state.registerPhoneNumber({
       phoneNumberId: id,

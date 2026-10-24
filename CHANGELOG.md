@@ -4,6 +4,20 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.6.1] — 2026-10-24
+
+### Fixed
+
+- **`POST /{waba_id}/phone_numbers` tells whether `phone_number` includes its
+  calling code by its length.** A national number that happened to start with
+  the code (a Brazilian `55912345678` with `cc: "55"`) was read as already
+  including it, and stored as `55912345678` instead of `5555912345678`. The
+  lengths a fixed-line or mobile number has in each country, from
+  libphonenumber's metadata, now decide; where both readings fit (34 of the
+  206 calling codes, Germany and China among them), Meta's own example still
+  does, and a number that includes its code is read as such. See
+  `THIRD_PARTY_NOTICES.md`.
+
 ## [0.6.0] — 2026-10-24
 
 ### Breaking

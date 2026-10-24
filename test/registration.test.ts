@@ -97,9 +97,17 @@ describe('a customer who finished Embedded Signup without a number', () => {
     expect(res.json()).toEqual({ success: true })
   })
 
+  it('reads a national number that starts with its calling code as national when its length says so', async () => {
+    const { waba_id: waba } = engine.createSignup({ phone: 'none' })
+    const { id } = engine.createPhoneNumber(waba, { cc: '55', phone_number: '55912345678', verified_name: 'Loja' })
+    expect(engine.state.phoneNumber(id)?.displayPhoneNumber).toBe('5555912345678')
+  })
+
   it('refuses a number that is not one, and a request missing its parts', async () => {
     const { waba_id: waba } = engine.createSignup({ phone: 'none' })
     for (const body of [
+      { cc: 'constructor', phone_number: 'constructor12345678', verified_name: 'X' },
+      { cc: '__proto__', phone_number: '12345678', verified_name: 'X' },
       { cc: '52', phone_number: 'abc', verified_name: 'X' },
       { cc: 'x', phone_number: '5512345678', verified_name: 'X' },
       { phone_number: '5512345678', verified_name: 'X' },
