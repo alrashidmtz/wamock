@@ -67,6 +67,14 @@ describe('a rejected control-API body says which field is wrong', () => {
     expect(detailOf(res)).toMatch(expected)
   })
 
+  it('answers the wrong-key example exactly as the README prints it', async () => {
+    // wamock words these itself rather than passing the validation library's
+    // text through. The zod 3 → 4 upgrade reworded every one of them, and the
+    // README's example silently stopped being true while every test passed.
+    const res = await post('/__mock/statuses', { messageId: 'wamid.x', status: 'read' })
+    expect(detailOf(res)).toBe("id: Required; Unrecognized key(s) in object: 'messageId'")
+  })
+
   it('names an unrecognised key rather than silently dropping it', async () => {
     // The schemas are .strict() on purpose: a typo'd field that is quietly
     // ignored is worse than a rejection, because the call appears to work.

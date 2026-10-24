@@ -15,6 +15,14 @@ import type { InboundContent } from '../webhooks/payloads.js'
  * is the reason to reach for a mock instead of reading documentation.
  */
 
+/**
+ * An integer, checked the way zod 3 checked it. zod 4's `.int()` also refuses
+ * anything past Number.MAX_SAFE_INTEGER and stops every check after it, so a
+ * negative fraction lost its second complaint. A refinement keeps both 0.3.1
+ * behaviours; `describeIssue` recognises it by its params.
+ */
+const integer = () => z.number().refine(Number.isInteger, { params: { wamock: 'integer' } })
+
 const InboundSchema = z
   .object({
     from: z.string(),
@@ -34,7 +42,7 @@ const InboundSchema = z
 
 // `.strict()` like the rest: a rejected call must name the key you got
 // wrong, not silently ignore it and complain only about what is missing.
-const AdvanceSchema = z.object({ ms: z.number().int() }).strict()
+const AdvanceSchema = z.object({ ms: integer() }).strict()
 
 const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) }).strict()
 
@@ -72,7 +80,7 @@ const StatusSchema = z
   .object({
     id: z.string(),
     status: z.enum(['sent', 'delivered', 'read', 'failed']),
-    error: z.number().int().optional(),
+    error: integer().optional(),
   })
   .strict()
 
@@ -82,7 +90,7 @@ const StatusSchema = z
  */
 const ScenarioSchema = z
   .object({
-    seed: z.number().int().optional(),
+    seed: integer().optional(),
     latencyMs: z
       .union([z.number().nonnegative(), z.object({ min: z.number(), max: z.number() }).strict()])
       .optional(),
@@ -91,7 +99,7 @@ const ScenarioSchema = z
     duplicateWebhooks: z.boolean().optional(),
     outOfOrderStatuses: z.boolean().optional(),
     nextError: z
-      .object({ code: z.number().int(), times: z.number().int().positive().optional() })
+      .object({ code: integer(), times: integer().positive().optional() })
       .strict()
       .optional(),
   })
@@ -127,11 +135,73 @@ function toInboundContent(input: z.infer<typeof InboundSchema>): InboundContent 
  * Render a validation failure so it names what to fix. Root-level issues (an
  * unrecognized key) carry no path, so prefixing them with ": " reads as a
  * missing field name — the caller has enough to work out already.
+ *
+ * The wording is wamock's, built from each issue's kind and the value that was
+ * sent, never the validation library's own message. It used to be zod's text
+ * passed through, so moving from zod 3 to zod 4 rewrote nearly every message
+ * ("Required" became "Invalid input: expected string, received undefined")
+ * with the whole suite still green: a dependency was deciding what this API
+ * says. `test/control-validation-wording.test.ts` pins every shape these
+ * schemas can fail with, worded exactly as 0.3.1 shipped them.
  */
-function describeIssues(error: z.ZodError): string {
+function describeIssues(error: z.ZodError, input: unknown): string {
   return error.issues
-    .map((issue) => (issue.path.length > 0 ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
+    .map((issue) => {
+      const text = describeIssue(issue, valueAt(input, issue.path))
+      return issue.path.length > 0 ? `${issue.path.map(String).join('.')}: ${text}` : text
+    })
     .join('; ')
+}
+
+function describeIssue(issue: z.core.$ZodIssue, received: unknown): string {
+  switch (issue.code) {
+    case 'invalid_type':
+      if (received === undefined) return 'Required'
+      // A JSON number that is still refused is one that overflowed to
+      // ±Infinity. zod would say "expected number, received number".
+      if (issue.expected === 'number' && typeof received === 'number') {
+        return `Expected finite number, received ${String(received)}`
+      }
+      return `Expected ${issue.expected}, received ${kindOf(received)}`
+    case 'custom':
+      if (issue.params?.['wamock'] === 'integer') return 'Expected integer, received float'
+      return issue.message
+    case 'invalid_value': {
+      const options = issue.values.map((option) => `'${String(option)}'`).join(' | ')
+      if (received === undefined) return 'Required'
+      if (typeof received === 'string') {
+        return `Invalid enum value. Expected ${options}, received '${received}'`
+      }
+      return `Expected ${options}, received ${kindOf(received)}`
+    }
+    case 'too_small':
+      return `Number must be greater than${issue.inclusive === true ? ' or equal to' : ''} ${String(issue.minimum)}`
+    case 'unrecognized_keys':
+      return `Unrecognized key(s) in object: ${issue.keys.map((key) => `'${key}'`).join(', ')}`
+    case 'invalid_union':
+      return 'Invalid input'
+    default:
+      // No schema here produces any other kind today. One added later still
+      // gets the library's message, which beats saying nothing.
+      return issue.message
+  }
+}
+
+/** The value an issue's path points at, or undefined if any step is missing. */
+function valueAt(input: unknown, path: readonly PropertyKey[]): unknown {
+  let current = input
+  for (const key of path) {
+    if (current === null || typeof current !== 'object') return undefined
+    current = (current as Record<PropertyKey, unknown>)[key]
+  }
+  return current
+}
+
+/** `typeof`, except that null and arrays get their own names. */
+function kindOf(value: unknown): string {
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return 'array'
+  return typeof value
 }
 
 /** A WABA as `/__mock/state` reports it: `subscribedApps` flattened to an array. */
@@ -185,7 +255,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = InboundSchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: describeIssues(parsed.error),
+        details: describeIssues(parsed.error, request.body),
       })
     }
 
@@ -243,7 +313,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = StatusSchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: describeIssues(parsed.error),
+        details: describeIssues(parsed.error, request.body),
       })
     }
     return reply.send(engine.forceStatus(parsed.data.id, parsed.data.status, parsed.data.error))
@@ -254,7 +324,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = ScenarioSchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: describeIssues(parsed.error),
+        details: describeIssues(parsed.error, request.body),
       })
     }
     // Drop keys the caller omitted: under exactOptionalPropertyTypes an

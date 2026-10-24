@@ -4,6 +4,43 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.3.2] — 2026-10-23
+
+**zod 3 → 4, with the control API's wording unchanged.**
+
+zod 3 has no fix for GHSA-mrhx-c7xc-m3w5 (unbounded memory on bounded
+collections, fixed in zod >= 4.6.6), so wamock moves to `^4.6.7`. Anyone who
+pinned an override to keep zod 3 out of their tree can drop it.
+
+The upgrade alone passed every test and still changed what the control API
+says. `describeIssues` passed zod's own messages through, and zod 4 rewrote
+nearly all of them: `from: Required` became `from: Invalid input: expected
+string, received undefined`. The README's own example (`id: Required;
+Unrecognized key(s) in object: 'messageId'`) silently stopped being true.
+Nothing caught it, because the tests only checked that the offending field was
+named.
+
+wamock now words these itself, from each issue's kind and the value that was
+sent. `test/control-validation-wording.test.ts` pins 36 invalid bodies across
+`/__mock/inbound`, `/__mock/statuses` and `/__mock/scenario`. Every answer was
+captured from the published 0.3.1, and every one comes back identical. A further
+3,200 generated bodies across all eight control endpoints answer exactly as 0.3.1
+did, status and wording both.
+
+zod 4 changed more than wording, and two of those changes are undone on purpose:
+
+- `.int()` now refuses integers past `Number.MAX_SAFE_INTEGER`, which 0.3.1
+  accepted as a `seed` or an `ms`. It also stops checking after the first
+  failure, so `times: -0.5` lost its second complaint. wamock checks integers
+  itself, the way zod 3 did, and both behaviours are back.
+
+One difference is kept, deliberately. A JSON number too large to represent, such
+as `1e400`, parses to `Infinity`. 0.3.1 accepted that, so `{"latencyMs":1e400}`
+scheduled statuses that never arrived. zod 4 refuses non-finite numbers, and
+wamock keeps the refusal. It reports it truthfully as `Expected finite number,
+received Infinity` rather than zod's `expected number, received number`. No
+realistic call sends one, so this ships as a patch.
+
 ## [0.3.1] — 2026-07-30
 
 **Fixed: the documented `docker run` command published a port that answered
