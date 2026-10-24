@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { ERROR_CODES, GraphError, isRetriable } from '../../src/errors/graph-error.js'
+import { ERROR_CODES, GraphError, isRetriable, unsupportedRequest } from '../../src/errors/graph-error.js'
 
 /**
  * The error catalogue as a pinned contract.
@@ -110,6 +110,53 @@ const CATALOG: Record<string, CatalogEntry> = {
     type: 'OAuthException',
     subcode: undefined,
     details: 'The template does not exist for the given name and language.',
+  },
+  MEDIA_UPLOAD_ERROR: {
+    code: 131053,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#131053) Unable to upload the media used in the message.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'The media could not be uploaded for one or more reasons, such as an unsupported media type.',
+  },
+  TEMPLATE_PARAMETER_FORMAT: {
+    code: 132012,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#132012) Parameter format does not match format in the created template',
+    type: 'OAuthException',
+    subcode: undefined,
+    details:
+      'The variable parameter values included in the request are not using the format specified in the template.',
+  },
+  INVALID_PAGINATION_CURSOR: {
+    code: 131059,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#131059) Invalid pagination cursor',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Retry the request without before or after cursors to get new ones.',
+  },
+  TEMPLATE_VALIDATION: {
+    code: 132018,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#132018) Template validation error',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: "There's an issue with the parameters in your template.",
+  },
+  TEMPLATE_PARAMETER_MISMATCH: {
+    code: 132000,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#132000) Number of parameters does not match the expected number of params',
+    type: 'OAuthException',
+    subcode: undefined,
+    details:
+      'The number of variable parameter values included in the request did not match the number of variable parameters defined in the template.',
   },
   TEMPLATE_PAUSED: {
     code: 132015,
@@ -252,6 +299,20 @@ describe('overrides do not leak into the pinned contract', () => {
 
     expect(body.error.message).toBe('(#100) Unsupported post request')
     expect(body.error.type).toBe('OAuthException')
+  })
+
+  it('renders Graph’s unsupported-request error: subcode 33, no prefix, no error_data', () => {
+    const body = unsupportedRequest('get', '123').toBody('t')
+    expect(body).toEqual({
+      error: {
+        message:
+          "Unsupported get request. Object with ID '123' does not exist, cannot be loaded due to missing permissions, or does not support this operation. Please read the Graph API documentation at https://developers.facebook.com/docs/graph-api",
+        type: 'GraphMethodException',
+        code: 100,
+        error_subcode: 33,
+        fbtrace_id: 't',
+      },
+    })
   })
 
   it('keeps the code prefix on the Error message itself, for logs', () => {

@@ -31,6 +31,9 @@ function harness(signup: Parameters<WamockEngine['createSignup']>[0] = {}) {
     },
   })
   const tenant = e.createSignup({ coexistence: true, ...signup })
+  // The partner's step 2, as in production: without it only account_update
+  // reaches the partner.
+  e.subscribeApp(tenant.waba_id)
   const changes = () => bodies.map((b) => JSON.parse(b).entry[0].changes[0])
   const entries = () => bodies.map((b) => JSON.parse(b).entry[0])
   const ofField = (field: string) => changes().filter((c) => c.field === field)
@@ -124,6 +127,13 @@ describe('synchronizing Business app data', () => {
         e.syncBusinessAppData(e.state.defaultPhoneNumberId, { messaging_product: 'whatsapp', sync_type: 'history' }),
       ),
     ).toBe(100)
+  })
+
+  it('refuses a number it does not host with Graph’s unsupported post request', () => {
+    const { e } = harness()
+    expect(() => e.syncBusinessAppData('PNID_GHOST', { messaging_product: 'whatsapp', sync_type: 'history' })).toThrow(
+      /^Unsupported post request\. Object with ID 'PNID_GHOST' does not exist/,
+    )
   })
 
   it('refuses an unknown sync type', () => {
@@ -363,6 +373,7 @@ describe('coexistence over HTTP', () => {
           contacts: [{ phone: CUSTOMER, full_name: 'Pablo Morales' }],
         })
       ).json()
+      await post(`/v26.0/${signup.waba_id}/subscribed_apps`, {})
 
       const synced = await post(`/v26.0/${signup.phone_number_id}/smb_app_data`, {
         messaging_product: 'whatsapp',
@@ -404,7 +415,7 @@ describe('coexistence through createWamock', () => {
       },
     })
     try {
-      const { phone_number_id } = mock.engine.createSignup({ coexistence: true })
+      const { phone_number_id } = mock.engine.createSignup({ coexistence: true, subscribed: true })
       await mock.businessApp.send({ phoneNumberId: phone_number_id, to: CUSTOMER, text: 'hola' })
       await mock.businessApp.contact({ phoneNumberId: phone_number_id, phone: CUSTOMER, full_name: 'Pablo' })
       await mock.businessApp.offboard({ phoneNumberId: phone_number_id, reconnect: false })
@@ -467,7 +478,7 @@ describe('coexistence payloads, field by field', () => {
     expect(ofField('history')[0]!.value).toEqual({
       messaging_product: 'whatsapp',
       metadata: {
-        display_phone_number: `+${e.state.phoneNumber(tenant.phone_number_id)!.displayPhoneNumber}`,
+        display_phone_number: e.state.phoneNumber(tenant.phone_number_id)!.displayPhoneNumber,
         phone_number_id: tenant.phone_number_id,
       },
       history: [
@@ -581,5 +592,109 @@ describe('coexistence payloads, field by field', () => {
     await e.settle()
     // The pre-reset timer was due at day 14; the new tenant's is due at day 15.
     expect(ofField('account_update').filter((c) => c.value.event === 'PARTNER_REMOVED')).toHaveLength(0)
+  })
+})
+
+describe('the business number in coexistence webhooks', () => {
+  it('is digits only in `from`, even when configured with formatting', async () => {
+    const bodies: string[] = []
+    const e = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH, transport: async (d) => void bodies.push(d.body) })
+    const { phone_number_id } = e.createSignup({
+      coexistence: true,
+      subscribed: true,
+      history: [{ phone: CUSTOMER, messages: [{ direction: 'out', text: 'hola', ago_ms: HOUR }] }],
+    })
+    e.state.updatePhoneNumber(phone_number_id, { displayPhoneNumber: '+1 555-000-2222' })
+    e.businessAppSend({ phoneNumberId: phone_number_id, to: CUSTOMER, text: 'x' })
+    e.syncBusinessAppData(phone_number_id, { messaging_product: 'whatsapp', sync_type: 'history' })
+    e.clock.advance(0)
+    await e.settle()
+
+    const values = bodies.map((b) => JSON.parse(b).entry[0].changes[0]).filter((c) => c.field !== 'account_update').map((c) => c.value)
+    for (const value of values) expect(value.metadata.display_phone_number).toBe('15550002222')
+    expect(values[0].message_echoes[0].from).toBe('15550002222')
+    expect(values[1].history[0].threads[0].messages[0].from).toBe('15550002222')
+  })
+})
+
+describe('a customer edits or deletes a message, on a Coexistence number', () => {
+  const MINUTE = 60 * 1000
+  const lastMessage = (h: ReturnType<typeof harness>) => h.ofField('messages').at(-1)!.value.messages[0]
+  const write = (h: ReturnType<typeof harness>, message: Record<string, unknown>) =>
+    h.e.simulateInbound({ phoneNumberId: h.tenant.phone_number_id, from: CUSTOMER, message: message as never }).messageId
+
+  it('reports an edited text whole, under the original’s id, as Meta’s edit webhook does', async () => {
+    const h = harness()
+    const original = write(h, { type: 'text', text: { body: 'hola' } })
+    h.e.clock.advance(15 * MINUTE)
+    write(h, { type: 'edit', edit: { message_id: original, text: 'hola, ¿abren hoy?' } })
+    await h.flush()
+    const edit = lastMessage(h)
+    expect(edit.type).toBe('edit')
+    expect(edit.id).not.toBe(original)
+    expect(edit.edit).toEqual({ original_message_id: original, message: { type: 'text', text: { body: 'hola, ¿abren hoy?' } } })
+  })
+
+  it('edits a caption, keeping the media and the reply context it had', async () => {
+    const h = harness()
+    const original = write(h, { type: 'image', image: { caption: 'antes' }, context: { id: 'wamid.BIZ' } })
+    await h.flush()
+    const sent = lastMessage(h).image
+    write(h, { type: 'edit', edit: { message_id: original, caption: 'después' } })
+    await h.flush()
+    expect(lastMessage(h).edit.message).toEqual({
+      context: { id: 'wamid.BIZ' },
+      type: 'image',
+      image: { caption: 'después', mime_type: sent.mime_type, sha256: sent.sha256, id: sent.id, url: sent.url },
+    })
+  })
+
+  it('revokes with only the original’s id, and nothing more can happen to it', async () => {
+    const h = harness()
+    const original = write(h, { type: 'text', text: { body: 'ups' } })
+    h.e.clock.advance(2 * DAY)
+    write(h, { type: 'revoke', revoke: { message_id: original } })
+    await h.flush()
+    expect(lastMessage(h)).toMatchObject({ type: 'revoke', revoke: { original_message_id: original } })
+    expect(h.codeOf(() => write(h, { type: 'revoke', revoke: { message_id: original } }))).toBe(100)
+    expect(h.codeOf(() => write(h, { type: 'edit', edit: { message_id: original, text: 'x' } }))).toBe(100)
+  })
+
+  it('holds edits to 15 minutes and revokes to two days', () => {
+    const h = harness()
+    const text = write(h, { type: 'text', text: { body: 'hola' } })
+    h.e.clock.advance(15 * MINUTE + 1)
+    expect(h.codeOf(() => write(h, { type: 'edit', edit: { message_id: text, text: 'tarde' } }))).toBe(100)
+    h.e.clock.advance(2 * DAY)
+    expect(h.codeOf(() => write(h, { type: 'revoke', revoke: { message_id: text } }))).toBe(100)
+  })
+
+  it('edits only a text or a media caption, and only the customer’s own message on this number', () => {
+    const h = harness()
+    const location = write(h, { type: 'location', location: { latitude: 1, longitude: 2 } })
+    const text = write(h, { type: 'text', text: { body: 'hola' } })
+    expect(h.codeOf(() => write(h, { type: 'edit', edit: { message_id: location, text: 'x' } }))).toBe(100)
+    expect(h.codeOf(() => write(h, { type: 'edit', edit: { message_id: text, caption: 'x' } }))).toBe(100)
+    expect(h.codeOf(() => write(h, { type: 'edit', edit: { message_id: 'wamid.NOPE', text: 'x' } }))).toBe(100)
+    const other = () =>
+      h.e.simulateInbound({ phoneNumberId: h.tenant.phone_number_id, from: '5215555000002', message: { type: 'revoke', revoke: { message_id: text } } as never })
+    expect(h.codeOf(other)).toBe(100)
+  })
+
+  it('neither opens nor renews the service window', () => {
+    const h = harness()
+    const text = write(h, { type: 'text', text: { body: 'hola' } })
+    h.e.clock.advance(DAY - MINUTE)
+    write(h, { type: 'revoke', revoke: { message_id: text } })
+    h.e.clock.advance(2 * MINUTE)
+    const reply = () =>
+      h.e.sendMessage(h.tenant.phone_number_id, { messaging_product: 'whatsapp', to: CUSTOMER, type: 'text', text: { body: 'x' } })
+    expect(h.codeOf(reply)).toBe(131047)
+  })
+
+  it('is refused on a number that did not come from the Business app', () => {
+    const e = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    const original = e.simulateInbound({ from: CUSTOMER, message: { type: 'text', text: { body: 'hola' } } }).messageId
+    expect(() => e.simulateInbound({ from: CUSTOMER, message: { type: 'revoke', revoke: { message_id: original } } as never })).toThrow(GraphError)
   })
 })

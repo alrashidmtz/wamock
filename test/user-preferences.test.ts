@@ -63,7 +63,7 @@ describe('user_preferences', () => {
       field: 'user_preferences',
       value: {
         messaging_product: 'whatsapp',
-        metadata: { display_phone_number: '+15550001111', phone_number_id: e.state.defaultPhoneNumberId },
+        metadata: { display_phone_number: '15550001111', phone_number_id: e.state.defaultPhoneNumberId },
         contacts: [{ profile: { name: 'Sheena Nelson' }, wa_id: CUSTOMER, user_id: userId }],
         user_preferences: [
           {
@@ -116,7 +116,7 @@ describe('user_preferences', () => {
 
   it('is kept per business phone number', async () => {
     const { e, statusesOf, flush } = harness()
-    const other = e.createSignup({ businessId: e.state.defaultBusinessId }).phone_number_id
+    const other = e.createSignup({ businessId: e.state.defaultBusinessId, subscribed: true }).phone_number_id
     e.createTemplate(e.state.waba(e.state.phoneNumber(other)!.wabaId)!.wabaId, {
       name: 'promo',
       language: 'es_MX',

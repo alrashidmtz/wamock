@@ -4,10 +4,12 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { parseArgs, DEFAULT_HOST, NON_LOOPBACK_HOSTS } from '../src/cli-args.js'
 import { VirtualClock } from '../src/core/clock.js'
+import { WamockEngine } from '../src/core/engine.js'
 import { MockState } from '../src/core/state.js'
 import { WebhookDeliverer } from '../src/webhooks/delivery.js'
 import { verifyWebhookUrl } from '../src/webhooks/handshake.js'
 import { buildInboundPayload, buildStatusPayload } from '../src/webhooks/payloads.js'
+import { createServer } from '../src/server.js'
 import { httpTransport } from '../src/webhooks/transport.js'
 
 /**
@@ -61,7 +63,7 @@ describe('outbound HTTP is bounded', () => {
     // worse than a failure: there is nothing to read.
     const url = await startBlackHole()
 
-    await expect(httpTransport(url, 150)({
+    await expect(httpTransport(url, { timeoutMs: 150 })({
       body: '{}',
       signature: 'sha256=x',
       payload: { object: 'whatsapp_business_account', entry: [] },
@@ -222,5 +224,81 @@ describe('retained history is bounded', () => {
 
     expect(deliverer.log()).toHaveLength(2)
     expect(deliverer.droppedLogEntries()).toBe(3)
+  })
+})
+
+describe('a business token is refused another customer’s objects as Graph refuses them', () => {
+  const tenants = () => {
+    const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    const onboard = () => {
+      const signup = engine.createSignup()
+      return { ...signup, token: engine.exchangeCode(engine.state.defaultAppId, 's', signup.code).access_token }
+    }
+    return { engine, a: onboard(), b: onboard() }
+  }
+  const messageOf = (fn: () => void): string => {
+    try {
+      fn()
+    } catch (err) {
+      return (err as Error).message
+    }
+    throw new Error('expected a refusal')
+  }
+
+  it('names the verb of the call in the unsupported-request error', () => {
+    const { engine, a, b } = tenants()
+    const refusal = (method?: 'get' | 'post' | 'delete') =>
+      messageOf(() =>
+        engine.assertAccessToken(a.token, { objectId: b.phone_number_id, ...(method !== undefined ? { method } : {}) }),
+      )
+    expect(refusal('post')).toMatch(new RegExp(`^Unsupported post request\\. Object with ID '${b.phone_number_id}'`))
+    expect(refusal('delete')).toMatch(/^Unsupported delete request/)
+    expect(refusal()).toMatch(/^Unsupported get request/)
+  })
+
+  it('lets it reach its own WABA, number and media', () => {
+    const { engine, a } = tenants()
+    const { id } = engine.uploadMedia(a.phone_number_id, {
+      messaging_product: 'whatsapp',
+      type: 'image/jpeg',
+      file: { bytes: Buffer.from('x') },
+    })
+    for (const objectId of [a.waba_id, a.phone_number_id, id]) {
+      expect(() => engine.assertAccessToken(a.token, { objectId, method: 'get' })).not.toThrow()
+    }
+  })
+})
+
+describe('uploading media needs the messaging permission', () => {
+  it('refuses a management-only token on POST /{phone_number_id}/media', async () => {
+    const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    server = createServer(engine)
+    await server.ready()
+    const upload = (token: string) =>
+      server!.inject({
+        method: 'POST',
+        url: `/v26.0/${engine.state.defaultPhoneNumberId}/media`,
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'multipart/form-data; boundary=b' },
+        payload: [
+          '--b\r\nContent-Disposition: form-data; name="messaging_product"\r\n\r\nwhatsapp\r\n',
+          '--b\r\nContent-Disposition: form-data; name="file"; filename="p.jpg"\r\nContent-Type: image/jpeg\r\n\r\nJPEG\r\n',
+          '--b--\r\n',
+        ].join(''),
+      })
+    const { access_token: managementOnly } = engine.issueToken({ scopes: ['whatsapp_business_management'] })
+    const { access_token: messagingOnly } = engine.issueToken({ scopes: ['whatsapp_business_messaging'] })
+    expect((await upload(managementOnly)).json().error.error_data.details).toMatch(/whatsapp_business_messaging/)
+    expect((await upload(messagingOnly)).statusCode).toBe(200)
+  })
+})
+
+describe('an object that does not exist needs no permission to be reported missing', () => {
+  it('answers a token without scopes Graph’s unsupported request, not a permissions error', async () => {
+    const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    server = createServer(engine)
+    await server.ready()
+    const { access_token: none } = engine.issueToken({ scopes: [] })
+    const res = await server.inject({ method: 'GET', url: '/v26.0/999999999999999', headers: { authorization: `Bearer ${none}` } })
+    expect(res.json().error).toMatchObject({ code: 100, error_subcode: 33 })
   })
 })

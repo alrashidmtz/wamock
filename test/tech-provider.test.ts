@@ -259,13 +259,15 @@ describe('§9.6.3 — a WABA that was never subscribed', () => {
     // anywhere — just silence.
     const signup = (await post('/__mock/embedded-signup', { subscribed: false })).json()
 
+    // Only the partner's own account_update (PARTNER_ADDED) gets through.
+    const messages = () => inbox.filter((d) => JSON.parse(d.body).entry[0].changes[0].field === 'messages')
     await post('/__mock/inbound', { from: CUSTOMER, text: 'hola', phone_number_id: signup.phone_number_id })
-    expect(inbox).toHaveLength(0)
+    expect(messages()).toHaveLength(0)
 
     await post(`/v19.0/${signup.waba_id}/subscribed_apps`)
 
     await post('/__mock/inbound', { from: CUSTOMER, text: 'hola otra vez', phone_number_id: signup.phone_number_id })
-    expect(inbox).toHaveLength(1)
+    expect(messages()).toHaveLength(1)
   })
 
   it('reports subscribed_apps success the way Meta does', async () => {
@@ -308,7 +310,9 @@ describe('phone number lookup', () => {
     )
 
     expect(res.statusCode).toBe(200)
-    expect(res.json().display_phone_number).toMatch(/^\+/)
+    // Formatted, unlike the digits-only number on every webhook: matching the
+    // two without normalizing both splits one number into two keys.
+    expect(res.json().display_phone_number).toBe('+1 555-000-1111')
   })
 
   it('returns quality rating and messaging limit when asked', async () => {
@@ -710,5 +714,149 @@ describe('signup codes are deterministic', () => {
   it('mints the same code in two identical runs', () => {
     const codeOf = () => new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH }).createSignup().code
     expect(codeOf()).toBe(codeOf())
+  })
+})
+
+describe('GET /{waba_id}/phone_numbers', () => {
+  it('lists the WABA’s numbers with Meta’s default fields, most recently onboarded first', async () => {
+    const waba = engine.state.defaultWabaId
+    engine.state.registerPhoneNumber({ phoneNumberId: 'PNID_SECOND', wabaId: waba, displayPhoneNumber: '16315555556' })
+
+    const res = await get(`/v26.0/${waba}/phone_numbers`)
+    expect(res.statusCode).toBe(200)
+    expect(res.json()).toEqual({
+      data: [
+        {
+          verified_name: 'wamock Test Business',
+          display_phone_number: '+1 631-555-5556',
+          id: 'PNID_SECOND',
+          quality_rating: 'GREEN',
+        },
+        {
+          verified_name: 'wamock Test Business',
+          display_phone_number: '+1 555-000-1111',
+          id: engine.state.defaultPhoneNumberId,
+          quality_rating: 'GREEN',
+        },
+      ],
+      paging: { cursors: { before: expect.any(String), after: expect.any(String) } },
+    })
+  })
+
+  it('sorts oldest first when asked to', async () => {
+    const waba = engine.state.defaultWabaId
+    engine.state.registerPhoneNumber({ phoneNumberId: 'PNID_SECOND', wabaId: waba, displayPhoneNumber: '16315555556' })
+
+    const res = await get(`/v26.0/${waba}/phone_numbers?sort=['last_onboarded_time_ascending']`)
+    expect(res.json().data.map((n: { id: string }) => n.id)).toEqual([engine.state.defaultPhoneNumberId, 'PNID_SECOND'])
+  })
+
+  it('returns exactly the fields finishSignupB asks for, coexistence included', async () => {
+    const signup = (await post('/__mock/embedded-signup', { coexistence: true })).json()
+
+    const res = await get(
+      `/v26.0/${signup.waba_id}/phone_numbers?fields=id,display_phone_number,verified_name,is_on_biz_app,platform_type,quality_rating`,
+    )
+    expect(res.json()).toEqual({
+      data: [
+        {
+          id: signup.phone_number_id,
+          display_phone_number: expect.stringMatching(/^\+1 \d{3}-\d{3}-\d{4}$/),
+          verified_name: 'wamock Test Business',
+          is_on_biz_app: true,
+          platform_type: 'CLOUD_API',
+          quality_rating: 'GREEN',
+        },
+      ],
+      paging: { cursors: { before: expect.any(String), after: expect.any(String) } },
+    })
+  })
+
+  it('only lists numbers of that WABA', async () => {
+    const signup = (await post('/__mock/embedded-signup', {})).json()
+    const res = await get(`/v26.0/${signup.waba_id}/phone_numbers`)
+    expect(res.json().data.map((n: { id: string }) => n.id)).toEqual([signup.phone_number_id])
+  })
+
+  it('answers an empty list for a WABA with no numbers yet', async () => {
+    engine.state.registerWaba({ wabaId: 'WABA_EMPTY', appId: engine.state.defaultAppId })
+    expect((await get('/v26.0/WABA_EMPTY/phone_numbers')).json()).toEqual({ data: [] })
+  })
+
+  it('refuses a WABA it does not know', async () => {
+    const res = await get('/v26.0/WABA_NOPE/phone_numbers')
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error.code).toBe(100)
+  })
+
+  it('checks the token like every other Graph call', async () => {
+    const token = engine.issueToken({ kind: 'short' }).access_token
+    engine.clock.advance(3 * HOUR)
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v26.0/${engine.state.defaultWabaId}/phone_numbers`,
+      headers: { authorization: `Bearer ${token}` },
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error.code).toBe(190)
+  })
+})
+
+describe('an expired token fails on every Graph route, not only on sends', () => {
+  const expired = () => {
+    const token = engine.issueToken({ kind: 'short' }).access_token
+    engine.clock.advance(3 * HOUR)
+    return { authorization: `Bearer ${token}`, 'content-type': 'application/json' }
+  }
+
+  it.each([
+    ['GET', () => `/v26.0/${engine.state.defaultPhoneNumberId}?fields=display_phone_number`],
+    ['GET', () => `/v26.0/${engine.state.defaultWabaId}/phone_numbers`],
+    ['GET', () => `/v26.0/${engine.state.defaultWabaId}/message_templates`],
+    ['POST', () => `/v26.0/${engine.state.defaultWabaId}/message_templates`],
+    ['DELETE', () => `/v26.0/${engine.state.defaultWabaId}/message_templates?name=x`],
+    ['GET', () => `/v26.0/${engine.state.defaultWabaId}/subscribed_apps`],
+    ['POST', () => `/v26.0/${engine.state.defaultPhoneNumberId}/media`],
+    ['POST', () => `/v26.0/${engine.state.defaultPhoneNumberId}/smb_app_data`],
+  ] as const)('%s %s', async (method, url) => {
+    const { authorization, ...json } = expired()
+    const bodyless = method === 'GET' || method === 'DELETE'
+    const res = await app.inject({
+      method,
+      url: url(),
+      headers: bodyless ? { authorization } : { authorization, ...json },
+      ...(bodyless ? {} : { payload: '{}' }),
+    })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error.code).toBe(190)
+  })
+
+  it('leaves the token endpoints to their own authentication', async () => {
+    const headers = expired()
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v26.0/debug_token?input_token=x&access_token=${engine.state.defaultAppId}|${PLATFORM_SECRET}`,
+      headers,
+    })
+    expect(res.statusCode).toBe(200)
+
+    const signup = (await post('/__mock/embedded-signup', {})).json()
+    const exchange = await app.inject({
+      method: 'GET',
+      url: `/v26.0/oauth/access_token?client_id=${engine.state.defaultAppId}&client_secret=${PLATFORM_SECRET}&code=${signup.code}`,
+      headers: { authorization: headers.authorization },
+    })
+    expect(exchange.statusCode).toBe(200)
+    expect(exchange.json().access_token).toEqual(expect.any(String))
+  })
+
+  it('still lets a call with no token, or a foreign one, through', async () => {
+    expect((await get(`/v26.0/${engine.state.defaultWabaId}/phone_numbers`)).statusCode).toBe(200)
+    const res = await app.inject({
+      method: 'GET',
+      url: `/v26.0/${engine.state.defaultWabaId}/phone_numbers`,
+      headers: { authorization: 'Bearer EAAJB-not-from-wamock' },
+    })
+    expect(res.statusCode).toBe(200)
   })
 })

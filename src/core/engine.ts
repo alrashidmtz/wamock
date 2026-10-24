@@ -4,14 +4,18 @@ import type { CoexistenceSeed } from '../graph/coexistence-service.js'
 import { MessagingService } from '../graph/messaging-service.js'
 import type { SendMessageResponse, SimulateInboundOptions } from '../graph/messaging-service.js'
 import { TechProviderService } from '../graph/tech-provider-service.js'
+import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
+import type { PhoneNumberListOptions } from '../graph/tech-provider-service.js'
 import { TemplateService } from '../graph/template-service.js'
-import type { TemplateCreateResponse } from '../graph/template-service.js'
+import type { TemplateCreateResponse, TemplateListOptions } from '../graph/template-service.js'
 import { WebhookDeliverer } from '../webhooks/delivery.js'
 import { WebhookDispatcher } from '../webhooks/dispatcher.js'
+import type { MessageStatus } from '../webhooks/payloads.js'
 import { nullTransport } from '../webhooks/transport.js'
 import type { WebhookTransport } from '../webhooks/transport.js'
 import { VirtualClock } from './clock.js'
 import type { MockContext } from './context.js'
+import { assertToken, requireWaba } from './guards.js'
 import { Pricing } from './pricing.js'
 import { Users } from './users.js'
 import { makeFbtraceId } from './ids.js'
@@ -89,8 +93,13 @@ export class WamockEngine {
   readonly #media: MediaService
   readonly #techProvider: TechProviderService
   readonly #coexistence: CoexistenceService
-  /** Set while `flush()` runs, so a re-entrant call cannot deadlock on itself. */
+  /** What every service is built from; the engine's own Graph checks use it too. */
+  readonly #context: MockContext
+  /** Whether a flush is running its rounds; see `flush()`. */
   #flushing = false
+  /** Bumped by `reset()`, so a request that awaited across one can tell. */
+  #epoch = 0
+  /** Set while `flush()` runs, so a re-entrant call cannot deadlock on itself. */
 
   constructor(options: WamockEngineOptions) {
     this.clock = new VirtualClock({
@@ -128,13 +137,14 @@ export class WamockEngine {
       limits: this.limits,
       dispatcher: this.dispatcher,
     }
+    this.#context = context
 
     this.#templates = new TemplateService(context)
     // Messaging needs template lookups on the send path; the two collaborate
     // through a narrow interface rather than merging into one service.
     this.#coexistence = new CoexistenceService(context)
-    this.#messaging = new MessagingService(context, this.#templates, this.#coexistence)
     this.#media = new MediaService(context)
+    this.#messaging = new MessagingService(context, this.#templates, this.#coexistence, this.#media)
     this.#techProvider = new TechProviderService(context, this.#coexistence)
   }
 
@@ -143,9 +153,12 @@ export class WamockEngine {
     return makeFbtraceId(this.state.nextSeq())
   }
 
-  /** Await any webhook deliveries the last `advance()` kicked off. */
-  async settle(): Promise<void> {
-    await this.deliverer.settle()
+  /**
+   * Await webhook deliveries in flight: all of them, or, with `from` (a
+   * `deliverer.nextAttempt()` taken earlier), those that started since.
+   */
+  async settle(from = 0): Promise<void> {
+    await this.deliverer.settle(from)
   }
 
   /**
@@ -155,7 +168,7 @@ export class WamockEngine {
    * able to freeze a test suite or hold an HTTP request open. The timer is
    * unref'd so this can never be the reason a process stays alive.
    */
-  async settleWithin(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS): Promise<void> {
+  async settleWithin(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS, from = 0): Promise<void> {
     let timer: ReturnType<typeof setTimeout> | undefined
     const expiry = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, timeoutMs)
@@ -163,7 +176,7 @@ export class WamockEngine {
     })
 
     try {
-      await Promise.race([this.settle(), expiry])
+      await Promise.race([this.settle(from), expiry])
     } finally {
       if (timer) clearTimeout(timer)
     }
@@ -189,24 +202,34 @@ export class WamockEngine {
    * progress, and under steady traffic the loop never converges. Measured, not
    * guessed: it hit the round cap and answered a valid control call with a 400.
    */
-  async flush(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS): Promise<void> {
-    // A nested flush defers to the one already running. Handlers reply by
-    // calling back into the mock, which flushes again from inside the delivery
-    // the outer flush is awaiting; waiting here would deadlock both until the
-    // timeout. The round loop below picks their work up anyway.
-    if (this.#flushing) return
+  async flush(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS, from?: number): Promise<void> {
+    // What this call set off: attempts starting from here, or from `from` when
+    // the caller set things off just before (an advance, a control request).
+    const since = from ?? this.deliverer.nextAttempt()
+
+    // Only one flush runs the rounds. Another call made meanwhile — from a
+    // handler, in-process or over HTTP, or from elsewhere — waits for the
+    // deliveries it set off and leaves the rest to the running flush. Its
+    // wait points forward only (attempts from `since` on), so it never waits
+    // on the delivery it may be running inside of. Letting it run rounds of
+    // its own instead made a receiver that answers every webhook through a
+    // helper nest flushes without bound: measured, it ran out of memory.
+    if (this.#flushing) return this.settleWithin(timeoutMs, since)
     this.#flushing = true
     try {
       const maxRounds = this.clock.frozen ? MAX_FLUSH_ROUNDS : 1
       for (let round = 0; round < maxRounds; round++) {
-        const before = this.deliverer.deliveredCount()
+        // Progress: one of this call's attempts started or finished, or a
+        // reset left new work in a fresh generation. Any of those may have
+        // made more due now; nothing else is this call's to wait for.
+        const before = this.deliverer.progressSince(since)
         this.clock.advance(0)
-        await this.settleWithin(timeoutMs)
-        if (this.deliverer.deliveredCount() === before) return
+        await this.settleWithin(timeoutMs, since)
+        if (this.deliverer.progressSince(since) === before) return
       }
       if (this.clock.frozen) {
         throw new Error(
-          `Webhook flush exceeded ${MAX_FLUSH_ROUNDS} rounds — a receiver is very likely answering every webhook with another one`,
+          `Webhook flush exceeded ${MAX_FLUSH_ROUNDS} rounds — a receiver is very likely answering every webhook with another one, or a WABA's callback keeps changing while its webhooks are delivered`,
         )
       }
     } finally {
@@ -214,7 +237,22 @@ export class WamockEngine {
     }
   }
 
+  /**
+   * Move the clock and wait for what that set off — `mock.time.advance()`.
+   *
+   * A flush from before the advance, so it covers what the advance fired and
+   * what that led to (replies, reroutes, retries that came due). It waits
+   * only for attempts that start from here on, so a handler calling it never
+   * waits for its own delivery or a sibling's.
+   */
+  async advanceAndSettle(ms: number, timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS): Promise<void> {
+    const since = this.deliverer.nextAttempt()
+    this.clock.advance(ms)
+    return this.flush(timeoutMs, since)
+  }
+
   reset(): void {
+    this.#epoch++
     this.#media.clear()
     this.#templates.clear()
     this.#coexistence.clear()
@@ -270,7 +308,7 @@ export class WamockEngine {
 
   forceStatus(
     messageId: string,
-    status: 'sent' | 'delivered' | 'read' | 'failed',
+    status: MessageStatus,
     errorCode?: number,
   ): { success: true } {
     return this.#messaging.forceStatus(messageId, status, errorCode)
@@ -282,8 +320,8 @@ export class WamockEngine {
     return this.#templates.create(wabaId, body)
   }
 
-  listTemplates(wabaId: string): { data: TemplateView[] } {
-    return this.#templates.list(wabaId)
+  listTemplates(wabaId: string, options: TemplateListOptions = {}): { data: TemplateView[]; paging?: Record<string, unknown> } {
+    return this.#templates.list(wabaId, options)
   }
 
   deleteTemplate(wabaId: string, name: string): { success: true } {
@@ -318,8 +356,17 @@ export class WamockEngine {
     return this.#media.upload(phoneNumberId, body)
   }
 
-  getMedia(mediaId: string): Record<string, unknown> {
-    return this.#media.get(mediaId)
+  getMedia(mediaId: string, options: { phoneNumberId?: string; baseUrl?: string } = {}): Record<string, unknown> {
+    return this.#media.get(mediaId, options)
+  }
+
+  deleteMedia(mediaId: string, options: { phoneNumberId?: string } = {}): { success: true } {
+    return this.#media.delete(mediaId, options)
+  }
+
+  /** The bytes behind a media URL this mock issued, or undefined (a 404). */
+  downloadMedia(query: { mid?: string; ext?: string; hash?: string }): { bytes: Buffer; mimeType: string } | undefined {
+    return this.#media.download(query)
   }
 
   // --- tech provider -------------------------------------------------------
@@ -377,12 +424,117 @@ export class WamockEngine {
     return this.#techProvider.debugToken(inputToken, appAccessToken)
   }
 
-  subscribeApp(wabaId: string, accessToken?: string): { success: true } {
-    return this.#techProvider.subscribeApp(wabaId, accessToken)
+  /** `body` may carry `override_callback_uri` with its `verify_token`. */
+  subscribeApp(wabaId: string, body: Record<string, unknown> = {}): { success: true } {
+    return this.#techProvider.subscribeApp(wabaId, body)
+  }
+
+  /**
+   * `POST /{waba_id}/subscribed_apps` as the Graph route runs it: an override
+   * callback must pass the verification handshake before the subscription is
+   * accepted, as Meta verifies it. Without an HTTP transport there is no URL
+   * to call, and the override is taken as given.
+   */
+  async subscribeAppVerified(wabaId: string, body: Record<string, unknown> = {}): Promise<{ success: true }> {
+    requireWaba(this.#context, wabaId)
+    const override = this.#techProvider.callbackOverrideOf(body)
+    if (override) await this.#verifyOverride(override, wabaId)
+    return this.subscribeApp(wabaId, body)
+  }
+
+  /**
+   * `POST /{phone_number_id}` with `webhook_configuration`: a number's own
+   * override, verified like a WABA's before it is stored. An empty
+   * `override_callback_uri` removes it, with nothing to verify.
+   */
+  async configurePhoneNumber(phoneNumberId: string, body: Record<string, unknown>): Promise<{ success: true }> {
+    const override = this.#techProvider.phoneCallbackOverrideOf(phoneNumberId, body)
+    if (override) await this.#verifyOverride(override, phoneNumberId)
+    return this.#techProvider.setPhoneCallbackOverride(phoneNumberId, override)
+  }
+
+  /**
+   * The handshake Meta runs on an override before accepting it. The 422 and
+   * its wording are the Subscribed Apps reference's; the phone number
+   * reference documents the same check without an example, so a number's
+   * override fails the same way.
+   */
+  async #verifyOverride(override: { url: string; verifyToken: string }, objectId: string): Promise<void> {
+    const epoch = this.#epoch
+    const result = await this.deliverer.verifyCallback(override.url, override.verifyToken)
+    // A reset while the handshake ran removed the object this request named,
+    // even if a new one now has the same id.
+    if (epoch !== this.#epoch) throw unsupportedRequest('post', objectId)
+    if (!result.ok) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        message: 'Webhook callback URL is not reachable or invalid',
+        shape: { type: 'GraphMethodException', errorData: false, codePrefix: false, httpStatus: 422 },
+      })
+    }
+  }
+
+  unsubscribeApp(wabaId: string): { success: true } {
+    return this.#techProvider.unsubscribeApp(wabaId)
   }
 
   listSubscribedApps(wabaId: string): { data: unknown[] } {
     return this.#techProvider.listSubscribedApps(wabaId)
+  }
+
+  listPhoneNumbers(
+    wabaId: string,
+    options: PhoneNumberListOptions = {},
+  ): { data: Array<Record<string, unknown>>; paging?: Record<string, unknown> } {
+    return this.#techProvider.listPhoneNumbers(wabaId, options)
+  }
+
+  /**
+   * Validate the token a Graph call carries. Only tokens wamock issued are
+   * checked; none at all, or one from elsewhere, passes. See core/guards.ts.
+   *
+   * - `scope`: the permission the endpoint needs.
+   * - `objectId` and `method`: the object the call reads or writes. A business
+   *   token from Embedded Signup is granted on its customer's WABA alone, so
+   *   any other WABA, number or media is, to it, an object that "cannot be
+   *   loaded due to missing permissions": Graph's unsupported-request error.
+   */
+  assertAccessToken(
+    accessToken: string | undefined,
+    access: { objectId?: string; edge?: string; method?: 'get' | 'post' | 'delete' } = {},
+  ): void {
+    assertToken(this.#context, accessToken, this.#scopeFor(access.objectId, access.edge))
+    if (accessToken === undefined || access.objectId === undefined) return
+    const grantedWaba = this.tokens.record(accessToken)?.wabaId
+    if (grantedWaba === undefined) return
+    const owner = this.#ownerWaba(access.objectId)
+    if (owner !== undefined && owner !== grantedWaba) {
+      throw unsupportedRequest(access.method ?? 'get', access.objectId)
+    }
+  }
+
+  /**
+   * The permission a Graph call needs: whatsapp_business_messaging to send and
+   * handle media, whatsapp_business_management to manage templates, numbers
+   * and subscriptions. Calls outside both are not checked: `smb_app_data`,
+   * the coexistence sync, is the one left, and Meta's pages do not say which
+   * permission it needs. Ownership is still checked for it.
+   */
+  #scopeFor(objectId: string | undefined, edge: string | undefined): string | undefined {
+    if (edge === 'messages' || edge === 'media') return 'whatsapp_business_messaging'
+    if (edge === 'message_templates' || edge === 'phone_numbers' || edge === 'subscribed_apps') {
+      return 'whatsapp_business_management'
+    }
+    if (edge !== undefined || objectId === undefined) return undefined
+    if (this.#media.ownerOf(objectId) !== undefined) return 'whatsapp_business_messaging'
+    if (this.state.phoneNumber(objectId) || this.state.waba(objectId)) return 'whatsapp_business_management'
+    return undefined
+  }
+
+  /** The WABA an object belongs to: itself, its number's, or its media's. */
+  #ownerWaba(objectId: string): string | undefined {
+    if (this.state.waba(objectId)) return objectId
+    const numberId = this.state.phoneNumber(objectId) ? objectId : this.#media.ownerOf(objectId)
+    return numberId === undefined ? undefined : this.state.phoneNumber(numberId)?.wabaId
   }
 
   getPhoneNumberFields(phoneNumberId: string, fields: string[]): Record<string, unknown> {

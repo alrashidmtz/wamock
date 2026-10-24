@@ -12,14 +12,14 @@ on:
 jobs:
   check:
     # `engines` promises Node >=22 on any platform, so that is what gets
-    # tested. Node 22 is the floor and 24 the current line; macOS matters
+    # tested. Node 22 is the floor, 24 and 26 the LTS lines after it; macOS matters
     # because that is where most of this tool's users are, and Windows because
     # nothing in package.json tells anyone it is unsupported.
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [22, 24]
+        node: [22, 24, 26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7

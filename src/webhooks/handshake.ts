@@ -54,15 +54,27 @@ export async function verifyWebhookUrl(
     return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
 
-  if (!response.ok) {
-    return { ok: false, reason: `receiver returned HTTP ${response.status}` }
+  // Meta wants a 200 whose body is the challenge and nothing else: not 204,
+  // not the challenge with a trailing newline, not JSON around it.
+  if (response.status !== 200) {
+    return { ok: false, reason: `receiver returned HTTP ${response.status}, not 200` }
   }
 
-  const body = (await response.text()).trim()
+  // Reading the body can fail too (a stream cut mid-way): that is a failed
+  // handshake like any other, never an exception out of here.
+  let body: string
+  try {
+    body = await response.text()
+  } catch (err) {
+    return { ok: false, reason: `could not read the receiver's answer: ${err instanceof Error ? err.message : String(err)}` }
+  }
   if (body !== challenge) {
     return {
       ok: false,
-      reason: `receiver did not echo hub.challenge (expected '${challenge}', got '${body.slice(0, 64)}')`,
+      reason:
+        body.trim() === challenge
+          ? `receiver echoed hub.challenge with surrounding whitespace; Meta compares it exactly`
+          : `receiver did not echo hub.challenge (expected '${challenge}', got '${body.slice(0, 64)}')`,
     }
   }
 

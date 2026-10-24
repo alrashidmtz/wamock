@@ -84,6 +84,22 @@ describe('MockState — the app graph', () => {
     const state = new MockState({ appSecret: 'x' })
     expect(() => state.registerWaba({ wabaId: 'WABA_X', appId: 'APP_GHOST' })).toThrow(/APP_GHOST/)
   })
+
+  it('refuses to subscribe or unsubscribe a WABA it does not host, naming it', () => {
+    const state = new MockState({ appSecret: 'x' })
+    expect(() => state.subscribeApp('WABA_GHOST', state.defaultAppId)).toThrow(/WABA_GHOST/)
+    expect(() => state.unsubscribeApp('WABA_GHOST', state.defaultAppId)).toThrow(/WABA_GHOST/)
+  })
+
+  it('drops the callback override when the app subscribes again without one', () => {
+    // Gone, not set to undefined: under exactOptionalPropertyTypes an
+    // optional field is either present with a value or absent.
+    const state = new MockState({ appSecret: 'x' })
+    state.subscribeApp(state.defaultWabaId, state.defaultAppId, { url: 'http://a/hook', verifyToken: 'vt' })
+    expect(state.waba(state.defaultWabaId)?.callbackOverride).toEqual({ url: 'http://a/hook', verifyToken: 'vt' })
+    state.subscribeApp(state.defaultWabaId, state.defaultAppId)
+    expect(state.waba(state.defaultWabaId)).not.toHaveProperty('callbackOverride')
+  })
 })
 
 describe('MockState — sequence and reset', () => {

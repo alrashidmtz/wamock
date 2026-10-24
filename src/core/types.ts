@@ -4,6 +4,8 @@
 export interface App {
   appId: string
   appSecret: string
+  /** What `debug_token` and `subscribed_apps` report as the app's name. */
+  name?: string
 }
 
 /**
@@ -26,10 +28,19 @@ export interface Waba {
    * That is the failure mode this field exists to reproduce (spec §9.3).
    */
   subscribedApps: Set<string>
+  /**
+   * Set by subscribing with `override_callback_uri`: this WABA's webhooks go
+   * to that URL, verified with this token, instead of the app's callback.
+   */
+  callbackOverride?: { url: string; verifyToken: string }
 }
 
 /** Meta's quality ratings, worst to best. */
-export type QualityRating = 'RED' | 'YELLOW' | 'GREEN'
+/**
+ * Meta's quality ratings. `UNKNOWN` is a number not rated yet, as the
+ * phone-number reference spells it.
+ */
+export type QualityRating = 'RED' | 'YELLOW' | 'GREEN' | 'UNKNOWN'
 
 /**
  * Messaging limits, counted in UNIQUE recipients reached outside a customer
@@ -52,9 +63,17 @@ export type MessagingTier = (typeof MESSAGING_TIERS)[number]
 export interface PhoneNumber {
   phoneNumberId: string
   wabaId: string
-  /** Digits only. Rendered with a `+` when it appears as `display_phone_number`. */
+  /**
+   * Digits only. Webhooks carry it that way; the Graph API formats it
+   * (`+1 555-000-1111`). See core/phone.ts.
+   */
   displayPhoneNumber: string
   qualityRating?: QualityRating
+  /**
+   * Set with `POST /{phone_number_id}` and `webhook_configuration`: this
+   * number's webhooks go here, ahead of its WABA's override and the app's URL.
+   */
+  callbackOverride?: { url: string; verifyToken: string }
 }
 
 /** A message a customer sent, kept so it can later be marked as read. */
@@ -64,6 +83,12 @@ export interface InboundRecord {
   /** Customer in `wa_id` form. */
   from: string
   receivedAt: number
+  /** The message type: a reaction cannot be the target of another one. */
+  type?: string
+  /** The message as delivered, for an edit to build on. */
+  content?: Record<string, unknown>
+  /** Revoked by the customer: nothing more can be done to it. */
+  revoked?: boolean
 }
 
 /** A successful mark-as-read call. Not a message: nothing is sent or billed. */
@@ -86,6 +111,8 @@ export interface OutboundMessage {
   recipientUserId: string
   /** Whether the business addressed it with `to` or with `recipient`. */
   sentTo: 'phone' | 'user_id'
+  /** The send's `biz_opaque_callback_data`, echoed on every status. */
+  bizOpaqueCallbackData?: string
   type: string
   /** The type-specific slice of the request body (`text`, `template`, `interactive`, …). */
   payload: Record<string, unknown>

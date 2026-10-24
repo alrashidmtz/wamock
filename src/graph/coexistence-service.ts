@@ -87,8 +87,8 @@ export class CoexistenceService {
 
   /** Called by Embedded Signup for a Business app number. */
   onboard(phoneNumberId: string, seed: CoexistenceSeed = {}): void {
-    const { clock, dispatcher } = this.#context
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId)
+    const { clock } = this.#context
+    requirePhoneNumber(this.#context, phoneNumberId)
     const entry: CoexistenceNumber = {
       onboardedAt: clock.now(),
       shareHistory: seed.shareHistory ?? true,
@@ -102,16 +102,6 @@ export class CoexistenceService {
     }
     this.#numbers.set(phoneNumberId, entry)
     this.#armInactivity(phoneNumberId, entry)
-
-    dispatcher.dispatchToWaba(
-      phoneNumber.wabaId,
-      buildAccountUpdatePayload({
-        wabaId: phoneNumber.wabaId,
-        timeMs: clock.now(),
-        event: 'PARTNER_ADDED',
-        ...this.#owner(phoneNumberId),
-      }),
-    )
   }
 
   /** Whether `?fields=is_on_biz_app` is true: onboarded and not disconnected. */

@@ -9,7 +9,7 @@
           "value": {
             "messaging_product": "whatsapp",
             "metadata": {
-              "display_phone_number": "+15550001111",
+              "display_phone_number": "15550001111",
               "phone_number_id": "PNID_1"
             },
             "contacts": [

@@ -210,7 +210,11 @@ describe('the failure paths a production client actually branches on', () => {
   it('completes the real fallback: 131047 caught, template sent instead', async () => {
     // This is the exact recovery both audited integrations implement, and the
     // reason 131047 has to be distinguishable from every other failure.
-    await mock.approveTemplate({ name: 'recordatorio_24h', language: 'es_MX' })
+    await mock.approveTemplate({
+      name: 'recordatorio_24h',
+      language: 'es_MX',
+      components: [{ type: 'BODY', text: 'Hola {{1}}, ¿seguimos?' }],
+    })
     await mock.inbound({ from: CUSTOMER, text: 'hola' })
     await mock.time.advance(HOURS(25))
 

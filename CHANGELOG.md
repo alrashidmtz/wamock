@@ -4,6 +4,276 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.5.0] — 2026-10-24
+
+**A field-by-field audit against Meta's current references, done with Codex
+as a second reviewer.** The aim is that a test passing against wamock means
+the same code works against Meta. Every gap the audit found was a case where
+the two disagreed: wamock accepted something Meta refuses, refused something
+Meta accepts, or left out behaviour an integration depends on. Each one below
+cites the page it comes from in a comment beside the code.
+
+**The business number carried a `+` in every webhook. Meta sends digits
+only.**
+
+`metadata.display_phone_number` was `+15550001111` on every webhook wamock has
+ever sent. Meta's examples show `15550783881`, in all of the roughly fifteen
+webhook references, and so do public captures from other integrations: 107
+repositories send digits only, against 6 with a `+`, one of which was wamock
+itself. Several of the 107 are n8n workflow exports, which record real
+executions. The `+` came from a hand-written test fixture that the README then
+described as verified in production. It was not.
+
+The quirk wamock meant to reproduce is real, but it sits elsewhere. The
+**Graph API** formats the same number: `GET
+/{phone_number_id}?fields=display_phone_number` now answers `+1 555-000-1111`,
+where it used to answer `+15550001111`. An integration that stores the Graph
+form at connect time and matches webhooks against it holds two keys for one
+number. North American numbers are grouped exactly as in Meta's examples.
+Elsewhere wamock writes `+{calling code} {national number}` without Meta's
+per-country grouping, which would need a phone number library.
+
+### Added
+
+- **Every message type the Messages API accepts:** `image`, `audio`, `video`,
+  `document` and `sticker` (by `id` or `link`), `location`, `contacts`,
+  `reaction` and the `cta_url` interactive. Sending one used to fail with
+  (#100). The per-type rules are checked: one of `id`/`link`, caption only on
+  image, video and document and at most 1024 characters, coordinates in range,
+  `name.formatted_name` on every contact, `display_text` up to 20 characters.
+  A media `id` must be one this mock holds and that has not expired, wherever
+  it appears: the media of the message, the media header of an interactive
+  message, or a media parameter of a template. Otherwise the send fails with
+  131009. Media of a type that kind of message cannot carry (a PDF sent as
+  an image) fails the send with 131053, as Meta's per-type message pages say
+  an unsupported format fails the request. A `link` that is not an http(s)
+  URL is accepted and then fails on its status with 131053, the way Meta
+  reports media it could not fetch. The type is judged by its base, so a
+  received voice note (`audio/ogg; codecs=opus`) can be sent back as audio. A reaction gets only a `sent` status and is not
+  priced. A reaction to a message from another chat, over 30 days old, or that
+  is itself a reaction fails on its status with 131009.
+- **Media as Meta handles it.** Upload is `multipart/form-data` with
+  `messaging_product`, `type` and `file`, checked against Meta's supported
+  types and their size limits. `type` may also come only on the file part,
+  as in Meta's own example (`-F 'file=@video.mp4;type=video/mp4'`). The id lives 30 days. Each `GET /{media_id}`
+  answers a fresh download URL that lives 5 minutes and really downloads:
+  `GET` it with a bearer token and you get the bytes and their MIME type, or a
+  404 once it has expired. `DELETE /{media_id}` works, and `phone_number_id`
+  limits both calls to the number that uploaded the media. `sha256` is base64,
+  as in Meta's examples. The interceptor routes `lookaside.fbsbx.com` to the
+  mock too.
+- **Form bodies on Graph routes.** `application/x-www-form-urlencoded`, with
+  nested objects as JSON-valued fields, is accepted like JSON, as Meta accepts
+  it.
+- **Inbound messages of every kind** through `POST /__mock/inbound` and
+  `mock.inbound()`: `image`, `video`, `document`, `audio` (with `voice`) and
+  `sticker` (with `animated`), each with a real media id that lives 7 days and
+  downloads the bytes the test supplied (`data` as base64, or `bytes`).
+  Also `location`, `contacts`, `reaction`, a template quick-reply tap
+  (`type: "button"`), and `unsupported` with Meta's 131051 error. Any inbound
+  can reply to a message with `context_id` / `contextId`, delivered as
+  `context: {from, id}`. A reaction without `emoji` is a removed reaction,
+  as Meta reports it. Inbound audio always carries `voice` and stickers
+  `animated`, `false` when not set.
+- **Webhook retries.** A delivery that fails is tried again, a minute later and
+  then at doubling intervals, for up to 7 days, as Meta retries.
+  `engine.reset()` drops pending retries. A webhook the app unsubscribed from
+  while it was being delivered is cancelled, not failed: nothing logged,
+  nothing retried. One whose WABA changed its callback meanwhile goes to the
+  new callback. A custom transport can cancel the same way by throwing the
+  exported `DeliveryCancelled`, and is handed a `DeliveryAttempt` to ask
+  whether it still counts.
+- **`DELETE /{waba_id}/subscribed_apps`**, and `override_callback_uri` with
+  `verify_token` on `POST`. The URL must pass the handshake with that token
+  before the subscription is accepted; otherwise Meta's 422, `Webhook callback
+  URL is not reachable or invalid` (a malformed URI gets the 400 `Invalid
+  callback URI format`, as does one over Meta's 200 characters). The WABA's
+  webhooks then go there, and `GET` reports the override. Unsubscribing stops
+  deliveries at once, retries included. Only the fields Meta's overrides page
+  lists follow an override (`messages`, the coexistence fields…): template and
+  account-level webhooks always go to the app's own URL, as with Meta.
+- **A phone number's own callback URL.** `POST /{phone_number_id}` with
+  `webhook_configuration: {override_callback_uri, verify_token}` sends that
+  number's webhooks there, ahead of its WABA's override, after the same
+  handshake; an empty `override_callback_uri` removes it. The WABA must be
+  subscribed first, as Meta requires. `GET
+  /{phone_number_id}?fields=webhook_configuration` reports `phone_number`,
+  `whatsapp_business_account` and `application`, each only when set.
+- **The `played` status** Meta has sent since March 17, 2026 the first time a
+  customer plays a voice message: `POST /__mock/statuses` takes it for an
+  `audio` message sent with `voice: true`, and refuses it for anything else,
+  since Meta never sends it there. Library mode gets `mock.status({ id,
+  status, error? })`, which forces any status and waits for its webhook, as
+  the other helpers do.
+- **`debug_token` answers every field of Meta's reference:**
+  `data_access_expires_at`, `issued_at`, `user_id` and `granular_scopes`, whose
+  `target_ids` name the customer's WABA for a business token. `application` is
+  the app's name. The app token is also accepted as a bearer token.
+- **Business tokens reach only their own customer.** A token from Embedded
+  Signup that touches another WABA, its numbers or its media gets Graph's
+  unsupported-request error, as with Meta. Tokens wamock did not issue are
+  still not checked.
+- **Permissions per endpoint.** Sending and media need
+  `whatsapp_business_messaging`; templates, phone numbers and subscriptions
+  need `whatsapp_business_management`. Before, only subscribing checked one.
+- **Phone-number fields from the reference:** `status`, `name_status`,
+  `unified_cert_status`, `account_mode`, `host_platform`,
+  `is_official_business_account`, `country_code` and `country_dial_code`. A
+  quality rating can be `UNKNOWN`.
+- **`GET /{waba_id}/phone_numbers`**, the call Embedded Signup's final step
+  makes to find the number it just connected. Meta's default fields
+  (`verified_name`, `display_phone_number`, `id`, `quality_rating`) come back,
+  or exactly the `fields` asked for, including `is_on_biz_app` and
+  `platform_type` for coexistence. Newest number first, or oldest first with
+  `sort=['last_onboarded_time_ascending']` or `sort=last_onboarded_time.asc`
+  (Meta's pages spell it both ways). It pages like every Graph edge: `limit`
+  (1 to 100), `after` and `before` cursors, and `paging.next` / `previous`.
+- **`GET /{waba_id}/message_templates` pages.** 25 templates a page unless
+  `limit` says otherwise (the default integrators report from Meta), with
+  `after`/`before` cursors and `paging.next`/`previous`; `?name=` filters. A
+  cursor that names no template answers `131059` from v24, as Meta's
+  changelog says; the message is wamock's, since Meta documents only the
+  code. `132018`, Meta's catch-all template validation error, is in the
+  catalogue with Meta's wording, for scenarios that force it.
+- **A Coexistence customer edits or deletes a message**, as the `edit` and
+  `revoke` messages webhooks Meta added for Coexistence in November 2025:
+  `POST /__mock/inbound` and `mock.inbound()` take `edit: {message_id, text |
+  caption}` within 15 minutes and `revoke: {message_id}` within two days. An
+  edit carries the whole message as it now reads, media and reply context
+  included. Neither opens or renews the service window; Meta's pages describe
+  the window as opened by the user writing, and say nothing of edits.
+- **`PARTNER_ADDED` on every signup.** Meta sends `account_update` "whenever a
+  customer successfully completes the Embedded Signup flow". `account_update`
+  belongs to the partner, so it arrives before the partner subscribes to the
+  customer's WABA.
+
+### Fixed
+
+- **Templates are checked as Meta checks them.** The category is
+  case-insensitive (Meta's own examples write `utility`); the name is at most
+  512 characters; the language must be one of the 111 Meta supports. A send
+  whose parameters do not match the template's placeholders (header text and
+  body; the exact set of names for a named template) fails with 132000, and
+  one whose value is not in its type's form (`text` without a string, an
+  empty object) with 132012. A copy code button's code is at most 20
+  characters, its `example` at creation and its `coupon_code` at send.
+  `mock.approveTemplate()` takes `components` so a test can declare them.
+- **Interactive limits:** body at most 1024 characters for buttons and 4096 for
+  lists, header text and footer at most 60, button id at most 256 and titles
+  unique, row id at most 200, at most 10 sections, and a title on each section
+  when there is more than one. A footer needs its text, and a header the
+  content of its type: text, image, video or document for buttons and CTA URL
+  messages, text only for lists. A CTA URL button needs a real http(s) URL.
+  Text messages are capped at 4096, a contacts message at 257 contacts.
+- **Only a template opens a conversation.** Every other type now needs the 24h
+  window, not just text and interactive.
+- **`recipient_type`** must be `individual`; `group` is refused as not
+  emulated.
+- **`biz_opaque_callback_data`** comes back on every status of the message,
+  and is a string of at most 512 characters, the limit Meta's changelog sets.
+- **Graph's error for an object that is not there.** An unknown WABA, number or
+  media id answers `Unsupported get request. Object with ID '…' does not
+  exist, cannot be loaded due to missing permissions, or does not support this
+  operation…`: code 100, subcode 33, `GraphMethodException`, as Graph words it.
+- **`mock.time.advance()` waits for everything the advance led to**, not
+  just the first deliveries: a reply your handler sends, or a webhook
+  rerouted to a new callback, arrives before the helper returns. One
+  exception: a call made while another helper or control request is still
+  delivering (from your handler, or concurrently) waits only for the
+  deliveries it fired itself, and leaves follow-ups that come due later to
+  the call already delivering. That is what keeps a handler that calls back
+  into the mock, in-process or over HTTP, from waiting on its own delivery.
+- **No helper or control request waits on a delivery that was already
+  running when it was called.** A handler calling back into the mock — even
+  a duplicate of the same webhook, or over HTTP — no longer waits for itself
+  until the timeout, and a long queue of earlier deliveries no longer counts
+  against a later request's 100-round limit.
+- **`engine.reset()` starts webhook delivery afresh.** A delivery still in
+  flight when the mock was reset no longer lands in the new log, and the HTTP
+  transport forgets which URLs it verified, so the next test runs the
+  handshake again.
+- **Only an HTTP 200 counts as delivered.** A receiver answering 201, 202 or
+  204 had its webhook counted as delivered; Meta retries it.
+- **The verification handshake is exact.** It needs a 200 whose body is the
+  challenge and nothing more: no 2xx other than 200, no trailing newline.
+  And nothing is delivered to a URL that has not passed it. The CLI used to
+  warn and deliver anyway; now webhooks wait, retried, and the handshake runs
+  again first. `createWamock({ webhookUrl, verifyToken })` does the same, and
+  library mode now sends the same headers as the server.
+
+- **An expired token now fails on every Graph route.** Only the send route and
+  app subscription checked a wamock-issued token. The template, media,
+  phone-number and `smb_app_data` routes answered an expired one with success,
+  so expired-token handling could only be exercised on sends.
+- **The calling-code table covers the whole E.164 plan:** 206 geographic codes,
+  matching libphonenumber's set. A Serbian or Finnish number had no country, so
+  its BSUID got the `ZZ` prefix and its Graph number missed the separating space.
+  Inmarsat's non-geographic 870 maps to no country.
+
+### Changed
+
+- **The Docker image runs on Node 26**, the line that becomes LTS on
+  2026-10-28 (it was Node 22, now in maintenance). The npm package still
+  supports Node 22 and later, and CI now tests 22, 24 and 26.
+- **fastify 5.12**, the only runtime dependency that moved. The toolchain is
+  current too: TypeScript 6.0, ESLint 10, Vitest 5, Stryker 10.
+  TypeScript stops at 6.0 because typescript-eslint supports nothing newer
+  yet.
+
+### Breaking
+
+- **A tenant from Embedded Signup starts unsubscribed.** Subscribing your app
+  to the customer's WABA is a step of its own with Meta, and an integration
+  that forgets it receives nothing in production. Call
+  `POST /{waba_id}/subscribed_apps` as your code does in production, or pass
+  `subscribed: true` to `/__mock/embedded-signup` / `engine.createSignup()`
+  for a test that is not about subscription. (Before, it was subscribed unless
+  you passed `subscribed: false`.)
+- **Media is uploaded as `multipart/form-data`**, with the file. A JSON upload
+  carries no file and fails, as with Meta. Media ids live 30 days and the URL
+  from `GET /{media_id}` lives 5 minutes, where before the id itself expired
+  after 5 minutes. `sha256` is base64.
+- **A media id sent in a message must exist.** One nobody uploaded fails with
+  131009.
+- **Every non-template message needs an open window**, media and location
+  included.
+- **A wamock-issued token is checked for permission and ownership on every
+  Graph route.** A token without `whatsapp_business_messaging` can no longer
+  send, and a business token can no longer reach another customer.
+- **A webhook your receiver rejected comes back.** Throwing in `onWebhook`, or
+  answering anything but 200, used to leave a failed entry in the log and
+  nothing more. Now it is retried, as Meta retries it: a minute later, then at
+  doubling intervals for 7 days of virtual time. A test that advances the
+  clock (say 24h, to expire the window) receives those webhooks again, so a
+  handler that is not idempotent shows duplicates it did not before. That is
+  the production behaviour; make the handler idempotent, or have it answer
+  200.
+- **Only a 200 counts, and an unverified URL receives nothing** over HTTP.
+- **Template sends must match the template's parameters** (132000), once the
+  template declares its components. A placeholder is written as Meta writes
+  it, `{{1}}` or `{{first_name}}`: `{{ 1 }}` with spaces is text, not a
+  parameter.
+- **`biz_opaque_callback_data` that is not a string, or longer than 512
+  characters, fails the send with (#100).** It used to be dropped silently, so
+  the statuses lacked what the app expected echoed.
+- `GET /{phone_number_id}` without `fields` answers Meta's four default fields
+  (`id`, `display_phone_number`, `verified_name`, `quality_rating`), not every
+  field wamock knows.
+- `GET /{waba_id}/phone_numbers` includes `paging`.
+- **A forced status takes an `error` code only with `failed`.** `POST
+  /__mock/statuses` with `{status: "read", error: …}` used to send a `read`
+  webhook carrying `errors`, which Meta never sends; it is now refused. And
+  `failed` needs its `error`, since every failed status Meta sends carries
+  one.
+- `GET /{waba_id}/message_templates` answers 25 templates a page; follow
+  `paging.next` for the rest, as production requires.
+- `metadata.display_phone_number` on every webhook (`messages`, statuses,
+  `user_preferences`, coexistence) is digits only. A receiver that strips the
+  `+` keeps working. One that compares it as-is to `+…` stops matching, and it
+  stops matching in production too.
+- `GET /{phone_number_id}?fields=display_phone_number` answers in Meta's
+  formatted style (`+1 555-000-1111`).
+
 ## [0.4.0] — 2026-10-23
 
 **wamock now emulates the WhatsApp Cloud API as Meta runs it today.** Several

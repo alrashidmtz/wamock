@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { WamockEngine } from '../../src/core/engine.js'
+import { SUPPORTED_LANGUAGES } from '../../src/core/templates.js'
 import { GraphError } from '../../src/errors/graph-error.js'
 
 const EPOCH = 1_750_000_000_000
@@ -479,7 +480,11 @@ describe('automatic recategorization', () => {
       messaging_product: 'whatsapp',
       to: '5215555000001',
       type: 'template',
-      template: { name: 'order_update', language: { code: 'es_MX' } },
+      template: {
+        name: 'order_update',
+        language: { code: 'es_MX' },
+        components: [{ type: 'body', parameters: [{ type: 'text', text: 'Ana' }, { type: 'text', text: 'A-1' }] }],
+      },
     })
     e.clock.advance(60_000)
     await e.settle()
@@ -544,5 +549,198 @@ describe('template timers belong to the template that set them', () => {
 
     e.clock.advance(3 * HOUR)
     expect(e.template(e.state.defaultWabaId, 'order_update', 'es_MX')!.status).toBe('PAUSED')
+  })
+})
+
+describe('template creation follows Meta’s rules', () => {
+  it('accepts the category in lowercase, as Meta’s own examples write it', () => {
+    const e = engine()
+    const res = e.createTemplate(e.state.defaultWabaId, templateBody({ category: 'utility' }))
+    expect(res.category).toBe('UTILITY')
+  })
+
+  it('refuses a name that is not a string, though its digits would match the pattern', () => {
+    const e = engine()
+    expect(catchGraphError(() => e.createTemplate(e.state.defaultWabaId, templateBody({ name: 5 }))).code).toBe(100)
+  })
+
+  it('refuses a category that is not a string', () => {
+    const e = engine()
+    expect(catchGraphError(() => e.createTemplate(e.state.defaultWabaId, templateBody({ category: 5 }))).code).toBe(100)
+  })
+
+  it('accepts a 512-character name and refuses a 513-character one', () => {
+    const e = engine()
+    expect(() => e.createTemplate(e.state.defaultWabaId, templateBody({ name: 'a'.repeat(512) }))).not.toThrow()
+    expect(catchGraphError(() => e.createTemplate(e.state.defaultWabaId, templateBody({ name: 'b'.repeat(513) }))).code).toBe(100)
+  })
+
+  it('refuses a language code Meta does not support', () => {
+    const e = engine()
+    // Lowercase region and made-up codes are the typos that pass a lenient mock.
+    for (const language of ['es_mx', 'english', 'xx_XX']) {
+      expect(catchGraphError(() => e.createTemplate(e.state.defaultWabaId, templateBody({ language }))).code).toBe(100)
+    }
+    expect(() => e.createTemplate(e.state.defaultWabaId, templateBody({ language: 'pt_BR' }))).not.toThrow()
+  })
+
+  it('accepts each of the 111 codes on Meta’s list, in Meta’s spelling', () => {
+    // Language, then an uppercase region when there is one (`es_MX`, `fil`, `prs_AF`).
+    expect(SUPPORTED_LANGUAGES.size).toBe(111)
+    expect([...SUPPORTED_LANGUAGES].filter((code) => !/^[a-z]{2,3}(_[A-Z]{2})?$/.test(code))).toEqual([])
+  })
+})
+
+// Left to Stryker on purpose in assertParameters: the guards against a
+// template component that is null, has no `text`, or a HEADER with no `format`
+// (lines guarding `typeof c === 'object'`, `typeof text === 'string'`,
+// `defined['format'] !== undefined`). Meta refuses such a template at
+// creation, so no send ever meets one.
+describe('sending a template checks its parameters', () => {
+  const approved = (e: WamockEngine, components: unknown[], extra: Record<string, unknown> = {}) => {
+    e.createTemplate(e.state.defaultWabaId, templateBody({ components, ...extra }))
+    e.transitionTemplate(e.state.defaultWabaId, 'order_update', 'es_MX', 'APPROVED')
+  }
+  const send = (e: WamockEngine, components: unknown[]) =>
+    e.sendMessage(e.state.defaultPhoneNumberId, {
+      messaging_product: 'whatsapp',
+      to: '5215555000001',
+      type: 'template',
+      template: { name: 'order_update', language: { code: 'es_MX' }, components },
+    })
+  const body = (...texts: string[]) => ({ type: 'body', parameters: texts.map((text) => ({ type: 'text', text })) })
+
+  it('sends when the body parameters match the placeholders', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Hola {{1}}, tu pedido {{2}}.' }])
+    expect(() => send(e, [body('Ana', 'A-1')])).not.toThrow()
+  })
+
+  it('accepts the media parameter of an image header', () => {
+    const e = engine()
+    approved(e, [
+      { type: 'HEADER', format: 'IMAGE', example: { header_handle: ['https://example.com/h.jpg'] } },
+      { type: 'BODY', text: 'Hola {{1}}' },
+    ])
+    expect(() =>
+      send(e, [{ type: 'header', parameters: [{ type: 'image', image: { link: 'https://example.com/a.jpg' } }] }, body('Ana')]),
+    ).not.toThrow()
+  })
+
+  it('does not check a template seeded without components, whose text is unknown', () => {
+    const e = engine()
+    approved(e, [])
+    expect(() => send(e, [body('Ana', 'A-1')])).not.toThrow()
+  })
+
+  it('fails with 132012 when a parameter carries no value in its type’s form', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Tu pedido {{1}} está listo.' }])
+    for (const parameter of [{}, { type: 'text' }, { type: 'text', text: 42 }, null, { type: 'currency' }]) {
+      expect(catchGraphError(() => send(e, [{ type: 'body', parameters: [parameter] }])).code).toBe(132012)
+    }
+    expect(() =>
+      send(e, [{ type: 'body', parameters: [{ type: 'currency', currency: { fallback_value: '$10', code: 'USD', amount_1000: 10000 } }] }]),
+    ).not.toThrow()
+  })
+
+  it('takes each value only under its own type: a value with no type, or the wrong one, is 132012', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Tu cita {{1}}.' }])
+    const currency = { fallback_value: '$10', code: 'USD', amount_1000: 10000 }
+    const dateTime = { fallback_value: 'February 25, 1977' }
+    for (const parameter of [
+      { text: 'Ana' },
+      { currency },
+      { date_time: dateTime },
+      { type: 'text', date_time: dateTime },
+      { type: 'currency', currency: '$10' },
+      { type: 'currency', currency: null },
+      { type: 'date_time' },
+      { type: 'date_time', date_time: 'February 25, 1977' },
+      { type: 'date_time', date_time: null },
+      // Not JSON, but a library caller can pass it: still 132012, not a TypeError.
+      undefined,
+    ]) {
+      expect(catchGraphError(() => send(e, [{ type: 'body', parameters: [parameter] }])).code).toBe(132012)
+    }
+    expect(() => send(e, [{ type: 'body', parameters: [{ type: 'date_time', date_time: dateTime }] }])).not.toThrow()
+  })
+
+  it('fails with 132000 when a named template gets fewer names than it defines', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Gracias, {{first_name}}! Pedido {{order_number}}.' }], { parameter_format: 'named' })
+    expect(
+      catchGraphError(() => send(e, [{ type: 'body', parameters: [{ type: 'text', parameter_name: 'first_name', text: 'Ana' }] }]))
+        .code,
+    ).toBe(132000)
+  })
+
+  it('fails with 132000 when there are too few or too many', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Hola {{1}}, tu pedido {{2}}.' }])
+    expect(catchGraphError(() => send(e, [body('Ana')])).code).toBe(132000)
+    expect(catchGraphError(() => send(e, [body('Ana', 'A-1', 'extra')])).code).toBe(132000)
+    expect(catchGraphError(() => send(e, [])).code).toBe(132000)
+  })
+
+  it('reads only the {{1}} syntax Meta documents: {{ 1 }} with spaces is text', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Hola {{ 1 }}, tu pedido {{2}}.' }])
+    expect(catchGraphError(() => send(e, [body('Ana', 'A-1')])).code).toBe(132000)
+    expect(() => send(e, [body('A-1')])).not.toThrow()
+  })
+
+  it('copies a coupon code of up to 20 characters, at creation and at send', () => {
+    // Meta's coupon template page: "Maximum 20 characters", both places.
+    const buttons = (example: unknown) => [
+      { type: 'BODY', text: 'Usa el código' },
+      { type: 'BUTTONS', buttons: [{ type: 'COPY_CODE', example }] },
+    ]
+    const e = engine()
+    for (const example of ['C'.repeat(21), '', 42]) {
+      expect(catchGraphError(() => e.createTemplate(e.state.defaultWabaId, templateBody({ components: buttons(example) }))).code).toBe(100)
+    }
+    approved(e, buttons('C'.repeat(20)))
+    const coupon = (code: unknown) => ({ type: 'button', sub_type: 'copy_code', index: 0, parameters: [{ type: 'coupon_code', coupon_code: code }] })
+    expect(() => send(e, [coupon('W'.repeat(20))])).not.toThrow()
+    for (const code of ['W'.repeat(21), '', undefined]) {
+      expect(catchGraphError(() => send(e, [coupon(code)])).code).toBe(100)
+    }
+  })
+
+  it('counts a repeated placeholder once', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: '{{1}}, sí, {{1}}: tu pedido {{2}}.' }])
+    expect(() => send(e, [body('Ana', 'A-1')])).not.toThrow()
+  })
+
+  it('checks the header text too', () => {
+    const e = engine()
+    approved(e, [
+      { type: 'HEADER', format: 'TEXT', text: 'Pedido {{1}}' },
+      { type: 'BODY', text: 'Listo.' },
+    ])
+    expect(catchGraphError(() => send(e, [])).code).toBe(132000)
+    expect(() => send(e, [{ type: 'header', parameters: [{ type: 'text', text: 'A-1' }] }])).not.toThrow()
+  })
+
+  it('matches named parameters by name', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Gracias, {{first_name}}! Pedido {{order_number}}.' }], { parameter_format: 'named' })
+    const named = (...pairs: Array<[string, string]>) => ({
+      type: 'body',
+      parameters: pairs.map(([parameter_name, text]) => ({ type: 'text', parameter_name, text })),
+    })
+    expect(() => send(e, [named(['first_name', 'Ana'], ['order_number', 'A-1'])])).not.toThrow()
+    expect(catchGraphError(() => send(e, [named(['first_name', 'Ana'], ['order_id', 'A-1'])])).code).toBe(132000)
+    // A repeated name must not stand in for the missing one.
+    expect(catchGraphError(() => send(e, [named(['first_name', 'Ana'], ['first_name', 'Eva'])])).code).toBe(132000)
+  })
+
+  it('needs no parameters for a template without placeholders', () => {
+    const e = engine()
+    approved(e, [{ type: 'BODY', text: 'Sin variables.' }])
+    expect(() => send(e, [])).not.toThrow()
   })
 })

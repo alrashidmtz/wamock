@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { COUNTRY_BY_CALLING_CODE, PHONE_SHARING_MS, Users } from '../../src/core/users.js'
+import { PHONE_SHARING_MS, Users } from '../../src/core/users.js'
 
 const DAY = 24 * 60 * 60 * 1000
 const MX = '5215555000001'
@@ -31,15 +31,6 @@ describe('Users — business-scoped user ids', () => {
     const id = users.bsuid('BIZ_1', MX)
     expect(users.resolve(id)).toEqual({ businessId: 'BIZ_1', waId: MX })
     expect(users.resolve('MX.00000000000000000000')).toBeUndefined()
-  })
-
-  it('keeps the calling-code table prefix-free, so lookup order never matters', () => {
-    // E.164 codes are prefix-free; an entry like '1242' beside '1' would make
-    // the first match depend on table order.
-    const codes = COUNTRY_BY_CALLING_CODE.map(([code]) => code)
-    const clashes = codes.flatMap((a) => codes.filter((b) => a !== b && b.startsWith(a)).map((b) => `${a}/${b}`))
-    expect(clashes).toEqual([])
-    expect(new Set(codes).size).toBe(codes.length)
   })
 
   it('falls back to ZZ for a calling code it has no country for', () => {

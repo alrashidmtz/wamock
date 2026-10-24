@@ -24,8 +24,22 @@ export const ERROR_CODES = {
   REENGAGEMENT: 131047,
   /** Blocked by spam / quality rating. Retriable with backoff. */
   SPAM_RATE_LIMIT: 131048,
+  /** The send's template parameters do not match the template's placeholders. */
+  TEMPLATE_PARAMETER_MISMATCH: 132000,
+  /** The media a message names is not a type that kind of message carries. */
+  MEDIA_UPLOAD_ERROR: 131053,
+  /** A template parameter's value is not in the form its type needs. */
+  TEMPLATE_PARAMETER_FORMAT: 132012,
+  /**
+   * Meta's catch-all for invalid template send parameters (v23+). wamock's own
+   * checks answer the more specific 132000 and 132012; the entry is here so a
+   * scenario forcing 132018 gets Meta's wording.
+   */
+  TEMPLATE_VALIDATION: 132018,
   /** No template for that name + language pair. */
   TEMPLATE_NOT_FOUND: 132001,
+  /** Listing templates (v24+) with a `before`/`after` cursor that names no template. */
+  INVALID_PAGINATION_CURSOR: 131059,
   /** Template paused by Meta for quality. Permanent until it transitions back. */
   TEMPLATE_PAUSED: 132015,
   /** Template paused too many times and disabled for good. Needs a new template. */
@@ -130,6 +144,59 @@ const CATALOG: Record<number, CatalogEntry> = {
     type: 'OAuthException',
     httpStatus: 400,
     details: 'The template does not exist for the given name and language.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.MEDIA_UPLOAD_ERROR]: {
+    // Both sentences are Meta's error code reference, verbatim. The per-type
+    // message pages say an unsupported format fails the request itself.
+    message: 'Unable to upload the media used in the message.',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'The media could not be uploaded for one or more reasons, such as an unsupported media type.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.TEMPLATE_PARAMETER_FORMAT]: {
+    // As for 132000: Graph's message as integrators report it, and the
+    // details from Meta's error code reference, verbatim.
+    message: 'Parameter format does not match format in the created template',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details:
+      'The variable parameter values included in the request are not using the format specified in the template.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.INVALID_PAGINATION_CURSOR]: {
+    // Meta's changelog (October 2025) documents the code and when it comes,
+    // not its wording, and the error code reference does not list it. The
+    // message restates the changelog; the code is what an integration
+    // branches on.
+    message: 'Invalid pagination cursor',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: 'Retry the request without before or after cursors to get new ones.',
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.TEMPLATE_VALIDATION]: {
+    // Meta's error code reference, verbatim.
+    message: 'Template validation error',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details: "There's an issue with the parameters in your template.",
+    errorData: true,
+    retriable: false,
+  },
+  [ERROR_CODES.TEMPLATE_PARAMETER_MISMATCH]: {
+    // The message is the one Graph returns in practice, as widely reported by
+    // integrators; the details are Meta's error code reference, verbatim.
+    message: 'Number of parameters does not match the expected number of params',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details:
+      'The number of variable parameter values included in the request did not match the number of variable parameters defined in the template.',
     errorData: true,
     retriable: false,
   },
@@ -249,6 +316,21 @@ export interface GraphErrorOptions {
   details?: string
   /** Overrides the catalogue message. Rarely needed. */
   message?: string
+  /** Overrides the shape for a Graph-level error that is not in the WhatsApp catalogue. */
+  shape?: Partial<Pick<CatalogEntry, 'type' | 'subcode' | 'errorData' | 'codePrefix' | 'httpStatus'>>
+}
+
+/**
+ * Graph's answer for an object the caller cannot see, whether it is absent,
+ * someone else's, or the wrong kind for the call: code 100, subcode 33,
+ * `GraphMethodException`, no `(#100)` prefix and no `error_data`. Integrations
+ * branch on the subcode, and the verb in the message follows the HTTP method.
+ */
+export function unsupportedRequest(method: 'get' | 'post' | 'delete', objectId: string): GraphError {
+  return new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+    message: `Unsupported ${method} request. Object with ID '${objectId}' does not exist, cannot be loaded due to missing permissions, or does not support this operation. Please read the Graph API documentation at https://developers.facebook.com/docs/graph-api`,
+    shape: { type: 'GraphMethodException', subcode: 33, errorData: false, codePrefix: false },
+  })
 }
 
 /** A Graph API failure, carrying everything needed to render Meta's exact response. */
@@ -259,7 +341,7 @@ export class GraphError extends Error {
   readonly #details: string | undefined
 
   constructor(code: number, options: GraphErrorOptions = {}) {
-    const entry = entryFor(code)
+    const entry = { ...entryFor(code), ...options.shape }
     const message = options.message ?? entry.message
     super(renderMessage(code, entry, message))
     this.name = 'GraphError'

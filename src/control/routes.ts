@@ -6,6 +6,7 @@ import { TEMPLATE_CATEGORIES, TEMPLATE_STATUSES } from '../core/templates.js'
 import { MESSAGING_TIERS } from '../core/types.js'
 import type { Business, PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
+import { MESSAGE_STATUSES } from '../webhooks/payloads.js'
 import type { InboundContent } from '../webhooks/payloads.js'
 
 /**
@@ -23,6 +24,17 @@ import type { InboundContent } from '../webhooks/payloads.js'
  * behaviours; `describeIssue` recognises it by its params.
  */
 const integer = () => z.number().refine(Number.isInteger, { params: { wamock: 'integer' } })
+
+const InboundMediaSchema = z
+  .object({
+    caption: z.string().optional(),
+    filename: z.string().optional(),
+    mime_type: z.string().optional(),
+    voice: z.boolean().optional(),
+    animated: z.boolean().optional(),
+    data: z.string().optional(),
+  })
+  .strict()
 
 const InboundSchema = z
   .object({
@@ -49,6 +61,39 @@ const InboundSchema = z
       .optional(),
     type: z.string().optional(),
     text: z.string().optional(),
+    // Media a customer sends. `data` is the file as base64; without it wamock
+    // stores a placeholder, and the media is downloadable either way.
+    image: InboundMediaSchema.optional(),
+    video: InboundMediaSchema.optional(),
+    document: InboundMediaSchema.optional(),
+    audio: InboundMediaSchema.optional(),
+    sticker: InboundMediaSchema.optional(),
+    location: z
+      .object({
+        latitude: z.number(),
+        longitude: z.number(),
+        name: z.string().optional(),
+        address: z.string().optional(),
+        url: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    contacts: z.array(z.record(z.string(), z.unknown())).optional(),
+    // Without `emoji`: the customer removed their reaction, which Meta reports
+    // as a reaction webhook with no `emoji` field.
+    reaction: z.object({ message_id: z.string(), emoji: z.string().optional() }).strict().optional(),
+    // A tap on a template's quick-reply button.
+    button: z.object({ payload: z.string(), text: z.string() }).strict().optional(),
+    unsupported: z.object({ type: z.string() }).strict().optional(),
+    // A Coexistence customer editing (a text, or a media caption) or revoking
+    // a message they sent, by its wamid.
+    edit: z
+      .object({ message_id: z.string(), text: z.string().optional(), caption: z.string().optional() })
+      .strict()
+      .optional(),
+    revoke: z.object({ message_id: z.string() }).strict().optional(),
+    // The wamid the customer replies to: delivered as `context: {from, id}`.
+    context_id: z.string().optional(),
     button_reply: z.object({ id: z.string(), title: z.string() }).optional(),
     list_reply: z
       .object({ id: z.string(), title: z.string(), description: z.string().optional() })
@@ -134,7 +179,7 @@ const NumberChangeSchema = z
 const QualitySchema = z
   .object({
     phone_number_id: z.string().optional(),
-    quality_rating: z.enum(['RED', 'YELLOW', 'GREEN']),
+    quality_rating: z.enum(['RED', 'YELLOW', 'GREEN', 'UNKNOWN']),
   })
   .strict()
 
@@ -145,7 +190,7 @@ const TierSchema = z
 const StatusSchema = z
   .object({
     id: z.string(),
-    status: z.enum(['sent', 'delivered', 'read', 'failed']),
+    status: z.enum(MESSAGE_STATUSES),
     error: integer().optional(),
   })
   .strict()
@@ -182,6 +227,20 @@ function toInboundContent(input: z.infer<typeof InboundSchema>): InboundContent 
 }
 
 function messageContent(input: z.infer<typeof InboundSchema>): InboundContent {
+  for (const type of ['image', 'video', 'document', 'audio', 'sticker'] as const) {
+    const media = input[type]
+    if (media) {
+      const { data, ...fields } = media
+      return { type, [type]: { ...fields, ...(data !== undefined ? { bytes: Buffer.from(data, 'base64') } : {}) } }
+    }
+  }
+  if (input.location) return { type: 'location', location: input.location }
+  if (input.contacts) return { type: 'contacts', contacts: input.contacts }
+  if (input.reaction) return { type: 'reaction', reaction: input.reaction }
+  if (input.button) return { type: 'button', button: input.button }
+  if (input.unsupported) return { type: 'unsupported', unsupported: input.unsupported }
+  if (input.edit) return { type: 'edit', edit: input.edit }
+  if (input.revoke) return { type: 'revoke', revoke: input.revoke }
   if (input.button_reply) {
     return {
       type: 'interactive',
@@ -198,7 +257,8 @@ function messageContent(input: z.infer<typeof InboundSchema>): InboundContent {
     return { type: 'text', text: { body: input.text } }
   }
   throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-    details: 'Provide `text`, `button_reply` or `list_reply` to describe the inbound message',
+    details:
+      'Provide one of `text`, `image`, `video`, `document`, `audio`, `sticker`, `location`, `contacts`, `reaction`, `button`, `button_reply`, `list_reply`, `unsupported`, `edit` or `revoke`',
   })
 }
 
@@ -286,10 +346,13 @@ interface WabaView {
   subscribedApps: string[]
 }
 
+/** A number as `/__mock/state` reports it: never its override's verify token. */
+type PhoneNumberView = Omit<PhoneNumber, 'callbackOverride'>
+
 export interface StateSnapshot {
   now: number
   businesses: Business[]
-  phoneNumbers: PhoneNumber[]
+  phoneNumbers: PhoneNumberView[]
   wabas: WabaView[]
   outboundCount: number
   webhooksDelivered: number
@@ -313,7 +376,7 @@ export function buildStateSnapshot(engine: WamockEngine): StateSnapshot {
     // Deliberately no app secrets: this endpoint is meant to be curl-ed and
     // pasted into bug reports.
     businesses: engine.state.businesses(),
-    phoneNumbers: engine.state.phoneNumbers(),
+    phoneNumbers: engine.state.phoneNumbers().map(({ callbackOverride: _override, ...view }) => view),
     wabas: engine.state.wabas().map((waba) => ({
       wabaId: waba.wabaId,
       appId: waba.appId,
@@ -344,6 +407,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
         : {}),
       ...(parsed.data.name !== undefined ? { contactName: parsed.data.name } : {}),
       ...(parsed.data.username !== undefined ? { username: parsed.data.username } : {}),
+      ...(parsed.data.context_id !== undefined ? { contextId: parsed.data.context_id } : {}),
       message: toInboundContent(parsed.data),
     })
 
@@ -581,7 +645,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = QualitySchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: 'quality_rating must be one of {RED, YELLOW, GREEN}',
+        details: 'quality_rating must be one of {RED, YELLOW, GREEN, UNKNOWN}',
       })
     }
     return reply.send(

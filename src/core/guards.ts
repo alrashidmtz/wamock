@@ -1,4 +1,4 @@
-import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
+import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 import type { MockContext } from './context.js'
 import type { PhoneNumber, Waba } from './types.js'
 
@@ -7,22 +7,21 @@ import type { PhoneNumber, Waba } from './types.js'
  * wording stays identical everywhere. Integrations match on these strings.
  */
 
-/** Meta's wording for an object id it does not recognize. */
-const unknownObject = (id: string): GraphError =>
-  new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-    message: 'Unsupported post request',
-    details: `Object with ID '${id}' does not exist, cannot be loaded due to missing permissions, or does not support this operation.`,
-  })
-
-export function requireWaba(context: MockContext, wabaId: string): Waba {
+/** The WABA, or Graph's unsupported-request error for the verb of the call. */
+export function requireWaba(context: MockContext, wabaId: string, method: 'get' | 'post' | 'delete' = 'post'): Waba {
   const waba = context.state.waba(wabaId)
-  if (!waba) throw unknownObject(wabaId)
+  if (!waba) throw unsupportedRequest(method, wabaId)
   return waba
 }
 
-export function requirePhoneNumber(context: MockContext, phoneNumberId: string): PhoneNumber {
+/** The number, or Graph's unsupported-request error for the verb of the call. */
+export function requirePhoneNumber(
+  context: MockContext,
+  phoneNumberId: string,
+  method: 'get' | 'post' | 'delete' = 'post',
+): PhoneNumber {
   const phoneNumber = context.state.phoneNumber(phoneNumberId)
-  if (!phoneNumber) throw unknownObject(phoneNumberId)
+  if (!phoneNumber) throw unsupportedRequest(method, phoneNumberId)
   return phoneNumber
 }
 

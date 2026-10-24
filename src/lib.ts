@@ -4,8 +4,8 @@ import type { TemplateCategory, TemplateStatus } from './core/templates.js'
 import type { OutboundMessage, ReadReceipt } from './core/types.js'
 import { installGraphInterceptor } from './intercept.js'
 import { createServer } from './server.js'
-import type { InboundContent } from './webhooks/payloads.js'
-import { inProcessTransport } from './webhooks/transport.js'
+import type { InboundContent, MessageStatus } from './webhooks/payloads.js'
+import { httpTransport, inProcessTransport } from './webhooks/transport.js'
 import type { WebhookDelivery } from './webhooks/transport.js'
 import type { FastifyInstance } from 'fastify'
 
@@ -30,6 +30,12 @@ export interface CreateWamockOptions {
   onWebhook?: (delivery: WebhookDelivery) => void | Promise<void>
   /** Also POST webhooks to this URL, for an app that cannot take a callback. */
   webhookUrl?: string
+  /**
+   * Run Meta's verification handshake against `webhookUrl` with this token
+   * before delivering, and deliver nothing until it passes, as Meta does.
+   * Without it the URL is trusted as already verified.
+   */
+  verifyToken?: string
   /** Starting virtual time. Defaults to now; pin it for byte-identical runs. */
   start?: number
   /** Shorten the 24h window to make expiry tests cheap. */
@@ -57,6 +63,18 @@ export interface CreateWamockOptions {
   displayPhoneNumber?: string
 }
 
+/** Media a customer sends, as the inbound helper takes it. */
+export interface InboundMedia {
+  caption?: string
+  filename?: string
+  mime_type?: string
+  /** An audio message recorded as a voice note. */
+  voice?: boolean
+  /** A sticker that moves. */
+  animated?: boolean
+  bytes?: Buffer
+}
+
 /** Shorthand for the inbound the control API accepts. */
 export interface InboundOptions {
   from: string
@@ -70,6 +88,29 @@ export interface InboundOptions {
    * days. `null` removes it.
    */
   username?: string | null
+  /** Media the customer sends. `bytes` is the file; without it a placeholder is stored. */
+  image?: InboundMedia
+  video?: InboundMedia
+  document?: InboundMedia
+  audio?: InboundMedia
+  sticker?: InboundMedia
+  location?: { latitude: number; longitude: number; name?: string; address?: string; url?: string }
+  contacts?: Array<Record<string, unknown>>
+  /** Leave `emoji` out for a removed reaction, as Meta's webhook does. */
+  reaction?: { message_id: string; emoji?: string }
+  /** A message type Meta does not support, delivered with error 131051. */
+  unsupported?: { type: string }
+  /** A tap on a template's quick-reply button. */
+  button?: { payload: string; text: string }
+  /**
+   * A Coexistence customer edits a message they sent within 15 minutes: a
+   * text gets `text`, an image, video or document a new `caption`.
+   */
+  edit?: { message_id: string; text?: string; caption?: string }
+  /** A Coexistence customer deletes a message they sent, within two days. */
+  revoke?: { message_id: string }
+  /** The wamid the customer replies to: delivered as `context: {from, id}`. */
+  contextId?: string
   /**
    * The Click-to-WhatsApp ad the user came from, as Meta's `referral` object.
    * Replying inside the service window opens a 7-day free entry point window.
@@ -121,17 +162,28 @@ export interface Wamock {
     value: 'stop' | 'resume'
     phoneNumberId?: string
   }): Promise<void>
+  /**
+   * Move a sent message to a status Meta does not reach on its own in a
+   * test: `read`, `played` (a voice message only), or `failed` with `error`.
+   */
+  status(options: { id: string; status: MessageStatus; error?: number }): Promise<void>
 
   time: {
     advance(ms: number): Promise<void>
     now(): number
   }
 
-  /** Create a template already APPROVED — the common test setup, in one call. */
+  /**
+   * Create a template already APPROVED — the common test setup, in one call.
+   * `components` is the template as you would submit it to Meta. A send must
+   * then supply exactly the parameters its `{{…}}` placeholders call for, or it
+   * fails with 132000, as at Meta; without components it takes none.
+   */
   approveTemplate(options: {
     name: string
     language: string
     category?: TemplateCategory
+    components?: unknown[]
   }): Promise<void>
   transitionTemplate(options: {
     name: string
@@ -245,6 +297,7 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
         from: inboundOptions.from,
         ...(inboundOptions.name !== undefined ? { contactName: inboundOptions.name } : {}),
         ...(inboundOptions.username !== undefined ? { username: inboundOptions.username } : {}),
+        ...(inboundOptions.contextId !== undefined ? { contextId: inboundOptions.contextId } : {}),
         ...(inboundOptions.phoneNumberId !== undefined
           ? { phoneNumberId: inboundOptions.phoneNumberId }
           : {}),
@@ -268,6 +321,11 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       await flush()
     },
 
+    async status({ id, status, error }) {
+      engine.forceStatus(id, status, error)
+      await flush()
+    },
+
     async setUserPreference(options) {
       engine.setUserPreference(options)
       await flush()
@@ -275,18 +333,17 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 
     time: {
       async advance(ms) {
-        engine.clock.advance(ms)
-        await engine.settleWithin(settleTimeoutMs)
+        await engine.advanceAndSettle(ms, settleTimeoutMs)
       },
       now: () => engine.clock.now(),
     },
 
-    async approveTemplate({ name, language, category = 'UTILITY' }) {
+    async approveTemplate({ name, language, category = 'UTILITY', components = [] }) {
       engine.createTemplate(engine.state.defaultWabaId, {
         name,
         language,
         category,
-        components: [],
+        components,
       })
       engine.transitionTemplate(engine.state.defaultWabaId, name, language, 'APPROVED')
       await flush()
@@ -399,21 +456,21 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
 // --- internals ------------------------------------------------------------
 
 function buildTransport(options: CreateWamockOptions) {
-  const { onWebhook, webhookUrl } = options
-  return inProcessTransport(async (delivery) => {
-    await onWebhook?.(delivery)
-    if (!webhookUrl) return
-    // Same bytes, same signature — never re-serialize on the way out.
-    const response = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Hub-Signature-256': delivery.signature,
-      },
-      body: delivery.body,
-    })
-    if (!response.ok) throw new Error(`webhook receiver returned HTTP ${response.status}`)
+  const { onWebhook, webhookUrl, verifyToken } = options
+  // The server's transport, so both doors deliver alike: same bytes, same
+  // headers, only a 200 counts, and a verify token gates on the handshake.
+  const http = webhookUrl
+    ? httpTransport(webhookUrl, verifyToken !== undefined ? { verifyToken } : {})
+    : undefined
+  // `attempt` goes through to HTTP, which checks it right before its POST:
+  // `onWebhook` may have awaited while the WABA unsubscribed or reset ran.
+  const transport = inProcessTransport(async (delivery, attempt) => {
+    if (attempt?.rerouted !== true) await onWebhook?.(delivery)
+    await http?.(delivery, attempt)
   })
+  return http
+    ? Object.assign(transport, { verifyCallback: http.verifyCallback, reset: http.reset, callbackUrl: http.callbackUrl })
+    : transport
 }
 
 function addressOf(app: FastifyInstance): string {
@@ -430,6 +487,17 @@ function toInboundContent(options: InboundOptions): InboundContent {
 }
 
 function messageContent(options: InboundOptions): InboundContent {
+  for (const type of ['image', 'video', 'document', 'audio', 'sticker'] as const) {
+    const media = options[type]
+    if (media) return { type, [type]: { ...media } }
+  }
+  if (options.location) return { type: 'location', location: options.location }
+  if (options.contacts) return { type: 'contacts', contacts: options.contacts }
+  if (options.reaction) return { type: 'reaction', reaction: options.reaction }
+  if (options.unsupported) return { type: 'unsupported', unsupported: options.unsupported }
+  if (options.button) return { type: 'button', button: options.button }
+  if (options.edit) return { type: 'edit', edit: { ...options.edit } }
+  if (options.revoke) return { type: 'revoke', revoke: { ...options.revoke } }
   if (options.buttonReply) {
     return {
       type: 'interactive',
@@ -513,5 +581,7 @@ export { GraphError, ERROR_CODES, isRetriable } from './errors/graph-error.js'
 export { signBody, verifySignature } from './webhooks/signature.js'
 export type { SignBodyInput, VerifySignatureInput } from './webhooks/signature.js'
 export { verifyWebhookUrl } from './webhooks/handshake.js'
-export type { WebhookDelivery, WebhookTransport } from './webhooks/transport.js'
+export { DeliveryCancelled } from './webhooks/transport.js'
+export type { DeliveryAttempt, WebhookDelivery, WebhookTransport } from './webhooks/transport.js'
 export type { OutboundMessage, ReadReceipt } from './core/types.js'
+export type { MessageStatus } from './webhooks/payloads.js'

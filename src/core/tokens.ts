@@ -46,6 +46,9 @@ interface TokenRecord {
   expiresAtMs: number
   revoked: boolean
   wabaId?: string
+  issuedAtMs: number
+  /** The (system) user the token was issued to. */
+  userId: string
 }
 
 /** The `data` object Meta returns from `GET /debug_token`. */
@@ -56,8 +59,20 @@ export interface DebugTokenData {
   is_valid: boolean
   /** Unix SECONDS, or 0 for "never expires". */
   expires_at: number
+  /** When the app's access to the user's data ends; 0 for a system user. */
+  data_access_expires_at: number
+  issued_at: number
   scopes: string[]
+  /** Per permission; `target_ids` only when it is limited to some objects. */
+  granular_scopes: Array<{ scope: string; target_ids?: string[] }>
+  user_id: string
 }
+
+/**
+ * Data access expiration: an app's access to a user's data lapses 90 days
+ * after the user last used it. System user tokens are not subject to it.
+ */
+const DATA_ACCESS_MS = 90 * 24 * HOUR_MS
 
 const LIFETIME_MS: Record<TokenKind, number> = {
   permanent: 0,
@@ -73,7 +88,8 @@ export class TokenStore {
     const lifetime = LIFETIME_MS[options.kind]
     // Derived from a counter, not drawn at random: two identical runs must
     // issue identical tokens, and `reset()` rewinds the counter.
-    const digest = createHash('sha256').update(`token:${++this.#seq}`).digest('hex').slice(0, 24)
+    const seq = ++this.#seq
+    const digest = createHash('sha256').update(`token:${seq}`).digest('hex').slice(0, 24)
     const token = `${options.kind.toUpperCase()}_${digest}`
 
     this.#tokens.set(token, {
@@ -84,6 +100,8 @@ export class TokenStore {
       expiresAtMs: lifetime === 0 ? 0 : nowMs + lifetime,
       revoked: false,
       ...(options.wabaId !== undefined ? { wabaId: options.wabaId } : {}),
+      issuedAtMs: nowMs,
+      userId: String(BigInt(`0x${createHash('sha256').update(`user:${seq}`).digest('hex').slice(0, 13)}`)),
     })
     return token
   }
@@ -131,7 +149,7 @@ export class TokenStore {
     return { appId: found.appId, ...(found.wabaId !== undefined ? { wabaId: found.wabaId } : {}) }
   }
 
-  debug(token: string, nowMs: number): DebugTokenData {
+  debug(token: string, nowMs: number, appName: (appId: string) => string = (appId) => appId): DebugTokenData {
     const record = this.#tokens.get(token)
     if (!record) {
       return {
@@ -140,17 +158,30 @@ export class TokenStore {
         application: 'unknown',
         is_valid: false,
         expires_at: 0,
+        data_access_expires_at: 0,
+        issued_at: 0,
         scopes: [],
+        granular_scopes: [],
+        user_id: '',
       }
     }
 
+    const seconds = (ms: number) => Math.floor(ms / 1000)
     return {
       app_id: record.appId,
       type: 'USER',
-      application: record.appId,
+      application: appName(record.appId),
       is_valid: this.isValid(token, nowMs),
-      expires_at: record.expiresAtMs === 0 ? 0 : Math.floor(record.expiresAtMs / 1000),
+      expires_at: record.expiresAtMs === 0 ? 0 : seconds(record.expiresAtMs),
+      data_access_expires_at: record.kind === 'permanent' ? 0 : seconds(record.issuedAtMs + DATA_ACCESS_MS),
+      issued_at: seconds(record.issuedAtMs),
       scopes: [...record.scopes],
+      // A business token from Embedded Signup is granted on the customer's
+      // WABA only, and says so here: this is where partners read the WABA id.
+      granular_scopes: record.scopes.map((scope) =>
+        record.wabaId !== undefined ? { scope, target_ids: [record.wabaId] } : { scope },
+      ),
+      user_id: record.userId,
     }
   }
 

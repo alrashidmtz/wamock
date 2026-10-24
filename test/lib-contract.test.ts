@@ -139,7 +139,7 @@ describe('constructor options actually take effect', () => {
     expect(payload.entry[0].id).toBe('WABA_CUSTOM')
     expect(payload.entry[0].changes[0].value.metadata).toMatchObject({
       phone_number_id: 'PNID_CUSTOM',
-      display_phone_number: '+15559990000',
+      display_phone_number: '15559990000',
     })
   })
 
@@ -217,7 +217,12 @@ describe('send() shapes', () => {
 
   it('passes template components through untouched', async () => {
     mock = await createWamock({ appSecret: 's', start: 1_750_000_000_000 })
-    await mock.approveTemplate({ name: 'promo', language: 'es_MX', category: 'MARKETING' })
+    await mock.approveTemplate({
+      name: 'promo',
+      language: 'es_MX',
+      category: 'MARKETING',
+      components: [{ type: 'BODY', text: 'Hola {{1}}' }],
+    })
 
     await mock.send({
       to: CUSTOMER,
@@ -284,5 +289,13 @@ describe('readReceipts', () => {
     expect(await res.json()).toEqual({ success: true })
     expect(mock.readReceipts()).toMatchObject([{ messageId, typingIndicator: true }])
     expect(mock.messages()).toEqual([])
+  })
+})
+
+describe('what a custom transport needs is exported', () => {
+  it('exports DeliveryCancelled, so a transport can cancel and be understood', async () => {
+    const lib = await import('../src/lib.js')
+    expect(new lib.DeliveryCancelled()).toBeInstanceOf(Error)
+    expect(new lib.DeliveryCancelled().name).toBe('DeliveryCancelled')
   })
 })

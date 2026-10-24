@@ -44,20 +44,34 @@ run it (after `build`) whenever a change touches what ships.
   unpauses, recategorizations) must be tracked and cancelled in that service's
   `clear()`, which `engine.reset()` calls.
 - **`engine.flush()`** is the one way a front door delivers what it triggered:
-  `advance(0)` + bounded settle (`settleWithin`), repeated while deliveries
-  keep happening when the clock is frozen (capped at 100 rounds, so a receiver
+  `advance(0)` + bounded settle (`settleWithin`), repeated while the
+  deliverer makes progress (an attempt settled, or `reset()` started a new
+  generation) when the clock is frozen (capped at 100 rounds, so a receiver
   that answers every webhook with another throws instead of hanging), a single
-  round when live. Re-entrant calls return immediately (handlers that call back
-  into the mock would otherwise deadlock). Both the library helpers and the
-  control API call it — never add a second drain implementation. Delivery
+  round when live. Only one flush runs rounds; a call made meanwhile (nested in
+  a handler, in-process or over HTTP, or concurrent) waits only for the
+  attempts it started itself and leaves the rest to the running one — letting
+  it run its own rounds made a receiver that answers every webhook nest flushes
+  until memory ran out. Every wait is forward-only: a call waits for attempts
+  numbered from its starting point (`deliverer.nextAttempt()`, taken before it
+  fires anything), never for one already running, so a handler never waits on
+  its own delivery or a sibling's. `mock.time.advance()` goes through
+  `advanceAndSettle()`; control requests take their starting point in an
+  `onRequest` hook. Both the library helpers and the control API call these —
+  never add a second drain implementation. Delivery
   statuses are scheduled at +50ms/+500ms, so they still need `time.advance()`.
 - **`src/server.ts`** is the HTTP shell (Fastify): routing and error rendering
-  only. Graph routes accept any `vNN.N` version segment, are strict about
-  content-type, and **never flush** (Meta answers a send without waiting on
+  only. Graph routes accept any `vNN.N` version segment, take JSON,
+  form-urlencoded and multipart bodies (`src/http/forms.ts`, hand-written to
+  keep two runtime deps), and **never flush** (Meta answers a send without waiting on
   your webhook endpoint). `/__mock/*` routes flush via hooks: writes in
   `onSend` (after the handler), `GET`s in `preHandler` (before answering, so
   `/__mock/state` doesn't report pre-drain counts); `POST /__mock/reset` is
-  deliberately not pre-flushed. Every error leaves as a Meta-shaped body via
+  deliberately not pre-flushed. A Graph `preHandler` checks every
+  wamock-issued token through `engine.assertAccessToken()`: validity, the
+  permission the edge needs, and that a business token owns the object
+  (otherwise `unsupportedRequest()`, Graph's code 100/subcode 33). Every error
+  leaves as a Meta-shaped body via
   `GraphError` (`src/errors/graph-error.ts`, the error catalogue).
 - **`src/control/routes.ts`** — the `/__mock/*` control API. Bodies are parsed
   as JSON regardless of content-type (so `curl -d` works) and validated with
@@ -70,6 +84,13 @@ run it (after `build`) whenever a change touches what ships.
   same `settleTimeoutMs` is passed to `createServer` so `baseUrl` callers get
   the same behaviour. `src/cli.ts` / `cli-args.ts` is server mode with a
   **live** clock. Same engine underneath, so modes can't drift.
+- **Media** (`src/graph/media-service.ts`) stores the bytes in memory: uploaded
+  ids live 30 days, received ones 7, and each `GET /{media_id}` signs a
+  5-minute download URL served at `DOWNLOAD_PATH`. A send by media `id` needs
+  `mimeTypeOf(id)`: undefined when the id expired or never existed (131009),
+  otherwise a type that suits the message kind (131053).
+- **Embedded Signup tenants start unsubscribed**, as with Meta; tests that are
+  not about subscription pass `subscribed: true` or subscribe explicitly.
 - **Coexistence** (`src/graph/coexistence-service.ts`) is reached through
   Embedded Signup (`createSignup({ coexistence: true })`) and gates sends via
   `assertCanSend`/`recordSend` in `MessagingService`. It owns its own timers
@@ -78,9 +99,16 @@ run it (after `build`) whenever a change touches what ships.
   redirect `graph.facebook.com`.
 - **Webhooks** (`src/webhooks/`): `WebhookDispatcher` is the *only* entry point
   to the delivery queue and owns three rules — silent drop when the WABA is
-  unsubscribed, per-tenant signing secret, duplication under the scenario.
-  `WebhookDeliverer` schedules deliveries on the clock; the transport receives
-  the exact signed bytes (never re-serialize `body`). Statuses (`sent`,
+  unsubscribed (except `account_update`, the partner's own field), per-tenant
+  signing secret, duplication under the scenario. It also attaches the
+  callback override to the delivery: the number's (`webhook_configuration`),
+  else its WABA's (`override_callback_uri`), and only for
+  `OVERRIDABLE_FIELDS` — template and account-level webhooks always go to the
+  app's URL, as Meta routes them. `WebhookDeliverer` schedules
+  deliveries on the clock and retries failures (1 min, doubling, up to 7
+  days; `clear()` drops them); the transport receives the exact signed bytes
+  (never re-serialize `body`). `httpTransport` counts only a 200 as delivered
+  and delivers nothing to a URL until it passes the verification handshake. Statuses (`sent`,
   `delivered`) are scheduled in virtual time, so in frozen mode they only
   arrive after `time.advance()`. `signBody`/`verifySignature` (public exports)
   take `(appSecret, rawBody)` or an `{ appSecret, body }` object, and throw a
@@ -98,15 +126,19 @@ run it (after `build`) whenever a change touches what ships.
   reference pages (`developers.facebook.com/documentation/business-messaging/whatsapp/…`,
   each has a `.md` variant that is easy to fetch) before coding them. When the
   reference contradicts itself, pick one form and say which and why in a code
-  comment. Never invent a field or wording. Messaging limits belong to the
+  comment. Never invent a field or wording. A quirk needs a source, either
+  captured traffic or Meta's own example. "Verified in production" did not hold
+  for the webhook's business-number `+`, which came from a hand-written fixture
+  and shipped from 0.1 to 0.4. Messaging limits belong to the
   business portfolio (`Waba.businessId`) and only count recipients reached
   outside a customer service window. Pricing is per message (`src/core/pricing.ts`), including free entry point
   windows. Users are identified by BSUID (`src/core/users.ts`): every
   `messages` webhook carries `user_id`, and `wa_id`/`from` disappear for a user
   with a username unless the number was in contact with that phone in the last
   30 days. Build webhook payloads from a `UserIdentity`, never from a bare phone.
-- **Reproduce Meta's quirks, don't smooth them over** (e.g. customer numbers
-  without `+`, business `display_phone_number` with `+`; status-only webhooks
+- **Reproduce Meta's quirks, don't smooth them over** (e.g. every number in a
+  webhook is digits only, while the Graph API formats the business number as
+  `+1 555-000-1111` — see `src/core/phone.ts`; status-only webhooks
   have no `messages` key; per-language template approval). Comment why so
   nobody "fixes" it.
 - **Error wording is contract.** `test/errors/catalog-contract.test.ts` pins
@@ -135,7 +167,7 @@ run it (after `build`) whenever a change touches what ships.
   two scores. A reported survivor is a lead: apply the mutation by hand and
   confirm the suite stays green before writing a test for it.
 - Fixtures in `test/fixtures/` are sanitized payload shapes using fixed
-  placeholders (`5215555000001`, `+15550001111`, `PNID_1`, `WABA_1`,
+  placeholders (`5215555000001`, `15550001111`, `PNID_1`, `WABA_1`,
   `wamid.TEST1`) — never real tokens/numbers.
 
 ## Conventions

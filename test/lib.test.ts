@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createWamock } from '../src/lib.js'
 import type { Wamock } from '../src/lib.js'
@@ -18,6 +18,7 @@ let mock: Wamock | undefined
 afterEach(async () => {
   await mock?.close()
   mock = undefined
+  vi.unstubAllGlobals()
 })
 
 describe('createWamock — the quickstart shape', () => {
@@ -38,6 +39,46 @@ describe('createWamock — the quickstart shape', () => {
 
     expect(mock.messages()).toHaveLength(1)
     expect(received.length).toBeGreaterThan(1)
+  })
+
+  it('moves a sent message to a status by hand, delivering it before resolving', async () => {
+    const statuses: string[] = []
+    mock = await createWamock({
+      appSecret: 's',
+      onWebhook: (delivery) => {
+        const value = (delivery.payload.entry[0]!.changes[0]!.value as { statuses?: Array<{ status: string }> })
+        for (const s of value.statuses ?? []) statuses.push(s.status)
+      },
+    })
+    await mock.inbound({ from: '5216691112233', text: 'hola' })
+    const { id } = await mock.send({ to: '5216691112233', text: 'buenas' })
+    await mock.time.advance(60_000)
+    statuses.length = 0
+
+    await mock.status({ id, status: 'read' })
+    expect(statuses).toEqual(['read'])
+    await mock.status({ id, status: 'failed', error: 131026 })
+    expect(statuses).toEqual(['read', 'failed'])
+    // A text is not a voice message: Meta never reports it played.
+    await expect(mock.status({ id, status: 'played' })).rejects.toMatchObject({ code: 100 })
+  })
+
+  it('delivers a Coexistence customer’s edit and revoke', async () => {
+    const messages: Array<Record<string, unknown>> = []
+    mock = await createWamock({
+      appSecret: 's',
+      onWebhook: (delivery) => {
+        const value = delivery.payload.entry[0]!.changes[0]!.value as { messages?: Array<Record<string, unknown>> }
+        messages.push(...(value.messages ?? []))
+      },
+    })
+    const tenant = mock.engine.createSignup({ coexistence: true, subscribed: true })
+    const from = '5216691112233'
+    const { messageId } = await mock.inbound({ phoneNumberId: tenant.phone_number_id, from, text: 'hola' })
+    await mock.inbound({ phoneNumberId: tenant.phone_number_id, from, edit: { message_id: messageId, text: 'hola!' } })
+    await mock.inbound({ phoneNumberId: tenant.phone_number_id, from, revoke: { message_id: messageId } })
+    expect(messages.map((m) => m['type'])).toEqual(['text', 'edit', 'revoke'])
+    expect(messages[2]!['revoke']).toEqual({ original_message_id: messageId })
   })
 
   it('exposes a baseUrl an app can be pointed at', async () => {
@@ -176,6 +217,65 @@ describe('inbound helpers', () => {
       type: 'interactive',
       interactive: { button_reply: { id: 'yes' } },
     })
+  })
+})
+
+describe('inbound helpers — every shorthand reaches its own type', () => {
+  it('sends a location and a template button tap under their own types', async () => {
+    const bodies: string[] = []
+    mock = await createWamock({ appSecret: 's', onWebhook: (d) => void bodies.push(d.body) })
+    const last = () => JSON.parse(bodies.at(-1)!).entry[0].changes[0].value.messages[0]
+
+    await mock.inbound({ from: '5216691112233', location: { latitude: 1, longitude: 2 } })
+    expect(last()).toMatchObject({ type: 'location', location: { latitude: 1, longitude: 2 } })
+
+    await mock.inbound({ from: '5216691112233', button: { payload: 'P', text: 'T' } })
+    expect(last()).toMatchObject({ type: 'button', button: { payload: 'P', text: 'T' } })
+  })
+})
+
+describe('approveTemplate', () => {
+  it('approves a template with no components when none are given', async () => {
+    mock = await createWamock({ appSecret: 's' })
+    await mock.approveTemplate({ name: 'hello', language: 'en_US' })
+    const [template] = mock.engine.listTemplates(mock.wabaId).data
+    expect(template).toMatchObject({ name: 'hello', status: 'APPROVED', components: [] })
+  })
+})
+
+describe('webhookUrl delivers as the server does', () => {
+  /** A receiver on `fetch` that passes the handshake when `pass()` says so. */
+  function receiver(pass: (url: URL) => boolean = () => true) {
+    const calls: Array<{ method: string; url: URL }> = []
+    vi.stubGlobal('fetch', async (input: string | URL, init?: RequestInit) => {
+      const url = new URL(String(input))
+      const method = init?.method ?? 'GET'
+      calls.push({ method, url })
+      if (method === 'POST') return new Response('ok')
+      return pass(url) ? new Response(url.searchParams.get('hub.challenge') ?? '') : new Response('no', { status: 403 })
+    })
+    return calls
+  }
+
+  it('runs the handshake with verifyToken before the first POST, and again after reset', async () => {
+    const calls = receiver()
+    mock = await createWamock({ appSecret: 's', webhookUrl: 'http://app/webhook', verifyToken: 'tok' })
+
+    await mock.inbound({ from: '5216691112233', text: 'hola' })
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST'])
+    expect(calls[0]!.url.searchParams.get('hub.verify_token')).toBe('tok')
+
+    await mock.reset()
+    await mock.inbound({ from: '5216691112233', text: 'otra vez' })
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST', 'GET', 'POST'])
+  })
+
+  it('verifies an override_callback_uri before accepting the subscription', async () => {
+    receiver((url) => url.host !== 'tenant')
+    mock = await createWamock({ appSecret: 's', webhookUrl: 'http://app/webhook' })
+    await expect(
+      mock.engine.subscribeAppVerified(mock.wabaId, { override_callback_uri: 'http://tenant/hook', verify_token: 'vt' }),
+    ).rejects.toMatchObject({ httpStatus: 422 })
   })
 })
 

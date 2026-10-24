@@ -4,16 +4,20 @@ import { assertToken, requirePhoneNumber } from '../core/guards.js'
 import { userIdentity } from '../core/identity.js'
 import { makeWamid } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
-import { normalizeWaId } from '../core/phone.js'
+import { normalizeWaId, toWebhookDisplayNumber } from '../core/phone.js'
+import { isRecord, isWebUrl } from '../core/values.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import {
   buildInboundPayload,
   buildNumberChangePayload,
   buildUserPreferencePayload,
 } from '../webhooks/payloads.js'
-import type { InboundContent, UserIdentity } from '../webhooks/payloads.js'
+import type { InboundContent, MessageStatus, UserIdentity } from '../webhooks/payloads.js'
 import { validateInteractive } from './interactive.js'
 import type { CoexistenceService } from './coexistence-service.js'
+import { MIME_TYPES_BY_KIND } from './media-service.js'
+import type { MediaService } from './media-service.js'
+import { MEDIA_TYPES, validateContacts, validateLocation, validateMedia, validateReaction } from './message-content.js'
 import type { TemplateService } from './template-service.js'
 
 /**
@@ -31,14 +35,51 @@ const STATUS_DELAYS = { sent: 50, delivered: 500 } as const
  */
 const MARKETING_OPTED_OUT = 131050
 
-/** Message types accepted in v1. */
-const SUPPORTED_TYPES = new Set(['text', 'template', 'interactive'])
+/** A media link Meta could not fetch: this one arrives on the status. */
+const MEDIA_UNUSABLE = ERROR_CODES.MEDIA_UPLOAD_ERROR
+
+/** How long after sending a customer can edit a message, and revoke one. */
+const EDIT_WINDOW_MS = 15 * 60 * 1000
+const REVOKE_WINDOW_MS = 2 * 24 * 60 * 60 * 1000
+/** Media whose caption a customer can edit. */
+const EDITABLE_MEDIA: ReadonlySet<string> = new Set(['image', 'video', 'document'])
+
+/** Meta's limit on `biz_opaque_callback_data`. */
+const OPAQUE_DATA_MAX = 512
 
 /**
- * Types that require an open 24h service window. Templates are exempt — being
- * the only way out of a closed window is what templates are for.
+ * The MIME type Meta reports for inbound media when the test does not say:
+ * the formats WhatsApp clients send. A voice note is Opus in Ogg, written with
+ * its codec, as Meta's audio example shows.
  */
-const REQUIRES_OPEN_WINDOW = new Set(['text', 'interactive'])
+function defaultInboundMime(type: string, voice: boolean): string {
+  if (type === 'audio') return voice ? 'audio/ogg; codecs=opus' : 'audio/mpeg'
+  return { image: 'image/jpeg', video: 'video/mp4', document: 'application/pdf', sticker: 'image/webp' }[type] ?? 'application/octet-stream'
+}
+
+
+/** Meta's text message limit. */
+const TEXT_BODY_MAX = 4096
+
+/** Every message type the Messages API accepts. */
+const SUPPORTED_TYPES = new Set([
+  'text',
+  'template',
+  'interactive',
+  ...Object.keys(MEDIA_TYPES),
+  'location',
+  'contacts',
+  'reaction',
+])
+
+/**
+ * Only a template may open a conversation: everything else needs an open 24h
+ * service window. Being the way out of a closed window is what templates are for.
+ */
+const requiresOpenWindow = (type: string): boolean => type !== 'template'
+
+/** A reaction can target a message from the last 30 days of the thread. */
+const REACTION_WINDOW_MS = 30 * 24 * 60 * 60 * 1000
 
 export interface SendMessageResponse {
   messaging_product: 'whatsapp'
@@ -61,6 +102,8 @@ export interface SimulateInboundOptions {
    * removes it.
    */
   username?: string | null
+  /** The wamid the customer is replying to; Meta sends it as `context.id`. */
+  contextId?: string
   message: InboundContent
 }
 
@@ -71,11 +114,19 @@ export class MessagingService {
 
   /** Coexistence numbers cap throughput and can be disconnected. */
   readonly #coexistence: CoexistenceService
+  /** A send by media `id` needs the media to exist. */
+  readonly #media: MediaService
 
-  constructor(context: MockContext, templates: TemplateService, coexistence: CoexistenceService) {
+  constructor(
+    context: MockContext,
+    templates: TemplateService,
+    coexistence: CoexistenceService,
+    media: MediaService,
+  ) {
     this.#context = context
     this.#templates = templates
     this.#coexistence = coexistence
+    this.#media = media
   }
 
   /** `POST /{version}/{phone_number_id}/messages`. */
@@ -91,13 +142,14 @@ export class MessagingService {
 
     const { type, rawTo, recipient } = this.#validateEnvelope(body)
     this.#validateTypePayload(type, body)
+    const mediaUnusable = this.#checkMediaReferences(type, body)
 
     const businessId = state.businessIdOf(phoneNumberId) ?? state.defaultBusinessId
     const sentTo = rawTo !== undefined ? 'phone' : 'user_id'
     const waId = rawTo !== undefined ? this.#resolvePhone(rawTo) : this.#resolveBsuid(recipient!, businessId)
 
     const windowOpen = windows.isOpen(phoneNumberId, waId, clock.now())
-    if (REQUIRES_OPEN_WINDOW.has(type) && !windowOpen) {
+    if (requiresOpenWindow(type) && !windowOpen) {
       throw new GraphError(ERROR_CODES.REENGAGEMENT)
     }
 
@@ -143,18 +195,22 @@ export class MessagingService {
     // Marketing to a user who tapped "Stop" is accepted, then fails on its
     // status with 131050. It is not delivered, so it is not billed.
     const stopped = category === 'marketing' && users.marketingStopped(phoneNumberId, waId)
+    // Media Meta could not use fails the same way, on the status, with 131053.
+    const failureCode = stopped ? MARKETING_OPTED_OUT : mediaUnusable ? MEDIA_UNUSABLE : undefined
 
     // Priced once, at acceptance, whether or not its webhooks get through: a
     // dropped webhook does not refund the message or its free-tier slot.
-    const entryPoint = stopped
+    const entryPoint = failureCode !== undefined
       ? undefined
       : this.#context.pricing.entryPoint(phoneNumberId, waId, clock.now(), {
           open: windowOpen,
           windowMs: windows.windowMs,
         })
-    const pricing = stopped
-      ? undefined
-      : (entryPoint?.pricing ?? this.#context.pricing.price(phoneNumberId, category, clock.now()))
+    // A reaction is never delivered as such (only `sent`), so it is not priced.
+    const pricing =
+      failureCode !== undefined || type === 'reaction'
+        ? undefined
+        : (entryPoint?.pricing ?? this.#context.pricing.price(phoneNumberId, category, clock.now()))
 
     const userId = users.bsuid(businessId, waId)
     // Messaging the phone number keeps it disclosed for 30 days; messaging the
@@ -163,6 +219,7 @@ export class MessagingService {
 
     const wamid = makeWamid(phoneNumberId, state.nextSeq())
     const { messaging_product: _mp, to: _to, recipient: _r, type: _t, ...rest } = body
+    const opaque = body['biz_opaque_callback_data'] as string | undefined
 
     state.recordOutbound({
       id: wamid,
@@ -173,14 +230,17 @@ export class MessagingService {
       type,
       payload: rest,
       sentAt: clock.now(),
+      ...(opaque !== undefined ? { bizOpaqueCallbackData: opaque } : {}),
     })
 
     // The other failure axis: the send is accepted and the app is told so, but
     // the webhooks never arrive. Silent, and the expensive one in production.
     if (!scenario.shouldDropWebhook()) {
       const user = this.#identity(phoneNumberId, waId)
-      if (pricing) {
-        this.#scheduleStatuses(phoneNumberId, wamid, user, sentTo, pricing, entryPoint?.window)
+      if (type === 'reaction') {
+        this.#scheduleReactionStatus(phoneNumberId, wamid, waId, user, sentTo, body['reaction'], opaque)
+      } else if (pricing) {
+        this.#scheduleStatuses(phoneNumberId, wamid, user, sentTo, pricing, entryPoint?.window, opaque)
       } else {
         const at = clock.now() + STATUS_DELAYS.sent + scenario.latency()
         dispatcher.dispatchStatus(phoneNumberId, {
@@ -189,7 +249,8 @@ export class MessagingService {
           user,
           sentTo,
           timestampMs: at,
-          errorCode: MARKETING_OPTED_OUT,
+          errorCode: failureCode ?? MARKETING_OPTED_OUT,
+          ...(opaque !== undefined ? { bizOpaqueCallbackData: opaque } : {}),
           atMs: at,
         })
       }
@@ -226,8 +287,14 @@ export class MessagingService {
       })
     }
 
+    // A customer editing or deleting a message they sent is not them writing
+    // to you, so it neither opens nor renews the window. An inference: Meta
+    // describes the window as opened when the user messages you, and is
+    // silent on edits.
+    const amendment = options.message.type === 'edit' || options.message.type === 'revoke'
+
     // The customer writing is the ONLY thing that opens or renews the window.
-    windows.recordInbound(phoneNumberId, waId, clock.now())
+    if (!amendment) windows.recordInbound(phoneNumberId, waId, clock.now())
 
     users.setProfile(waId, {
       ...(options.contactName !== undefined ? { name: options.contactName } : {}),
@@ -236,7 +303,7 @@ export class MessagingService {
     // Judged before this message counts as contact: a user with a username
     // writing in does not disclose their own number by doing so.
     const user = this.#identity(phoneNumberId, waId)
-    if (user.phoneShared) users.recordPhoneContact(phoneNumberId, waId, clock.now())
+    if (user.phoneShared && !amendment) users.recordPhoneContact(phoneNumberId, waId, clock.now())
 
     // A message from a Click-to-WhatsApp ad carries a referral, and makes the
     // business's reply free.
@@ -244,8 +311,18 @@ export class MessagingService {
       this.#context.pricing.noteAdEntry(phoneNumberId, waId, clock.now())
     }
 
+    const message = amendment
+      ? this.#amendment(phoneNumberId, waId, options.message)
+      : this.#inboundContent(phoneNumberId, phoneNumber.displayPhoneNumber, options)
     const messageId = makeWamid(phoneNumberId, state.nextSeq())
-    state.recordInbound({ id: messageId, phoneNumberId, from: waId, receivedAt: clock.now() })
+    state.recordInbound({
+      id: messageId,
+      phoneNumberId,
+      from: waId,
+      receivedAt: clock.now(),
+      type: options.message.type,
+      content: message,
+    })
     dispatcher.dispatch(
       phoneNumberId,
       buildInboundPayload({
@@ -255,11 +332,109 @@ export class MessagingService {
         user,
         messageId,
         timestampMs: clock.now(),
-        message: options.message,
+        message,
       }),
     )
 
     return { messageId }
+  }
+
+  /**
+   * A customer editing or revoking a message they sent, as Meta reports it to
+   * a Coexistence number (the only kind its pages describe these webhooks
+   * for): an edit within 15 minutes, of a text or a media caption, carries the
+   * whole message as it now reads; a revoke within two days carries only the
+   * original's id.
+   */
+  #amendment(phoneNumberId: string, waId: string, request: InboundContent): InboundContent {
+    const { clock, state } = this.#context
+    const kind = request.type as 'edit' | 'revoke'
+    const fields = isRecord(request[kind]) ? request[kind] : {}
+    const refuse = (details: string) => new GraphError(ERROR_CODES.INVALID_PARAMETER, { details })
+
+    if (!this.#coexistence.isOnBizApp(phoneNumberId)) {
+      throw refuse(`Meta sends ${kind} webhooks for Coexistence numbers; ${phoneNumberId} was not onboarded from the WhatsApp Business app`)
+    }
+    const original = typeof fields['message_id'] === 'string' ? state.inbound(fields['message_id']) : undefined
+    if (!original || original.phoneNumberId !== phoneNumberId || original.from !== waId || !original.content) {
+      throw refuse(`${kind}: no message ${String(fields['message_id'])} from ${waId} on this number`)
+    }
+    if (original.revoked === true || original.type === 'edit' || original.type === 'revoke') {
+      throw refuse(`${kind}: message ${original.id} was revoked, or is itself an edit or a revoke`)
+    }
+    const age = clock.now() - original.receivedAt
+
+    if (kind === 'revoke') {
+      if (age > REVOKE_WINDOW_MS) throw refuse(`revoke: message ${original.id} is more than two days old`)
+      state.recordInbound({ ...original, revoked: true })
+      return { type: 'revoke', revoke: { original_message_id: original.id } }
+    }
+
+    if (age > EDIT_WINDOW_MS) throw refuse(`edit: message ${original.id} is more than 15 minutes old`)
+    const { type } = original.content as { type: string }
+    const context = isRecord(original.content['context']) ? { context: { id: original.content['context']['id'] } } : {}
+    let edited: Record<string, unknown>
+    if (type === 'text' && typeof fields['text'] === 'string') {
+      edited = { ...context, type, text: { body: fields['text'] } }
+    } else if (EDITABLE_MEDIA.has(type) && typeof fields['caption'] === 'string') {
+      const { id, mime_type: mimeType, sha256, url } = original.content[type] as Record<string, unknown>
+      edited = { ...context, type, [type]: { caption: fields['caption'], mime_type: mimeType, sha256, id, url } }
+    } else {
+      throw refuse('edit: a text takes `text`, an image, video or document takes `caption`; nothing else can be edited')
+    }
+    const body = isRecord(edited[type]) ? edited[type] : {}
+    state.recordInbound({ ...original, content: { ...original.content, [type]: { ...(original.content[type] as object), ...body } } })
+    return { type: 'edit', edit: { original_message_id: original.id, message: edited } }
+  }
+
+  /**
+   * The message object as Meta delivers it. Media gets a real, downloadable
+   * media id (7-day lifetime, like ids from webhooks), its hash and URL; a
+   * reply gets `context: {from, id}`, `from` being the business number; an
+   * unsupported message carries Meta's 131051 error.
+   */
+  #inboundContent(phoneNumberId: string, businessNumber: string, options: SimulateInboundOptions): InboundContent {
+    const { type } = options.message
+    let content: InboundContent = { ...options.message }
+
+    if (MEDIA_TYPES[type]) {
+      const media = { ...(content[type] as Record<string, unknown> | undefined) }
+      const { bytes, ...fields } = media
+      const mimeType =
+        typeof fields['mime_type'] === 'string' ? fields['mime_type'] : defaultInboundMime(type, fields['voice'] === true)
+      const received = this.#media.receive(
+        phoneNumberId,
+        mimeType,
+        Buffer.isBuffer(bytes) ? bytes : Buffer.from(`wamock ${type}`),
+      )
+      // `voice` and `animated` are always there, true or false, as in Meta's
+      // audio and sticker references.
+      const flags =
+        type === 'audio' ? { voice: fields['voice'] === true } : type === 'sticker' ? { animated: fields['animated'] === true } : {}
+      content = {
+        ...content,
+        [type]: { ...fields, mime_type: mimeType, sha256: received.sha256, id: received.id, url: received.url, ...flags },
+      }
+    }
+
+    if (type === 'unsupported') {
+      content = {
+        errors: [
+          {
+            code: 131051,
+            title: 'Message type unknown',
+            message: 'Message type unknown',
+            error_data: { details: 'Message type is currently not supported.' },
+          },
+        ],
+        ...content,
+      }
+    }
+
+    if (options.contextId !== undefined) {
+      content = { ...content, context: { from: toWebhookDisplayNumber(businessNumber), id: options.contextId } }
+    }
+    return content
   }
 
   /**
@@ -385,12 +560,12 @@ export class MessagingService {
 
   /**
    * Drive a message to a specific status on demand (spec §6.2) — the only way
-   * to test a `read` receipt or a delivery failure, since neither happens on
-   * its own.
+   * to test a `read` receipt, a voice message `played`, or a delivery
+   * failure, since none of them happens on its own.
    */
   forceStatus(
     messageId: string,
-    status: 'sent' | 'delivered' | 'read' | 'failed',
+    status: MessageStatus,
     errorCode?: number,
   ): { success: true } {
     const { clock, state, dispatcher } = this.#context
@@ -401,6 +576,25 @@ export class MessagingService {
         details: `No message with id '${messageId}' was sent through this mock`,
       })
     }
+    // Meta reports a play only for a voice message: `audio` sent with
+    // `voice: true`. Forcing it on anything else would let a test expect a
+    // webhook that never comes.
+    // Meta's `errors` comes with every failed status and with no other.
+    if ((errorCode !== undefined) !== (status === 'failed')) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details:
+          status === 'failed'
+            ? 'Status failed needs an error code: every failed status Meta sends carries errors'
+            : `An error code goes only with status failed, not ${status}: Meta reports errors on failed statuses alone`,
+      })
+    }
+    const audio = message.payload['audio']
+    const voice = message.type === 'audio' && isRecord(audio) && audio['voice'] === true
+    if (status === 'played' && !voice) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Message '${messageId}' is not a voice message; Meta sends played only for audio sent with voice: true`,
+      })
+    }
 
     dispatcher.dispatchStatus(message.phoneNumberId, {
       messageId,
@@ -408,6 +602,9 @@ export class MessagingService {
       user: this.#identity(message.phoneNumberId, message.to),
       sentTo: message.sentTo,
       timestampMs: clock.now(),
+      ...(message.bizOpaqueCallbackData !== undefined
+        ? { bizOpaqueCallbackData: message.bizOpaqueCallbackData }
+        : {}),
       ...(errorCode !== undefined ? { errorCode } : {}),
     })
     return { success: true }
@@ -426,6 +623,19 @@ export class MessagingService {
       })
     }
 
+    // Meta documents `individual` and `group`. Groups are a separate API that
+    // wamock does not emulate, so a group send is refused outright rather than
+    // quietly treated as a 1:1 message.
+    const recipientType = body['recipient_type']
+    if (recipientType !== undefined && recipientType !== 'individual') {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details:
+          recipientType === 'group'
+            ? 'recipient_type group is not emulated by wamock (the Groups API is out of scope)'
+            : "Param recipient_type must be one of {individual, group}",
+      })
+    }
+
     // `to` (a phone number) or `recipient` (a BSUID). With both, `to` wins.
     const rawTo = typeof body['to'] === 'string' && body['to'].trim() !== '' ? body['to'] : undefined
     const recipient =
@@ -438,6 +648,16 @@ export class MessagingService {
     if (!SUPPORTED_TYPES.has(type)) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
         details: `Param type must be one of {${[...SUPPORTED_TYPES].join(', ')}}`,
+      })
+    }
+
+    // A string of up to 512 characters (Meta raised it from 256, per its
+    // changelog). Anything else is refused rather than dropped, so a status
+    // never silently lacks the data the app expects echoed.
+    const opaque = body['biz_opaque_callback_data']
+    if (opaque !== undefined && (typeof opaque !== 'string' || opaque.length > OPAQUE_DATA_MAX)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Param biz_opaque_callback_data must be a string of at most ${OPAQUE_DATA_MAX} characters`,
       })
     }
 
@@ -476,12 +696,88 @@ export class MessagingService {
   }
 
 
+  /**
+   * Every media reference a send carries, wherever it sits: the media of a
+   * media message, the media header of an interactive message, a media
+   * parameter of a template. Checked the same way in all three places:
+   *
+   * - an `id` this mock does not hold, or one past its lifetime, is refused
+   *   at once with 131009;
+   * - an `id` whose media is not a type this kind of message carries (a PDF
+   *   as an image) is refused at once with 131053: the per-type message
+   *   pages say an unsupported format fails the request, with no message id;
+   * - a `link` that is not an http(s) URL is accepted, and fails on its
+   *   status with 131053, as a link Meta could not fetch does: the error
+   *   code reference reports 131053 on the webhook of a message that failed.
+   *   An inference: the docs require a public URL but do not say whether a
+   *   string that is not one fails the send or the status.
+   *
+   * Returns whether the send must fail that way, on its status.
+   */
+  #checkMediaReferences(type: string, body: Record<string, unknown>): boolean {
+    const found: Array<{ where: string; kind: string; media: Record<string, unknown> }> = []
+    const content = body[type]
+    if (MEDIA_TYPES[type] && isRecord(content)) found.push({ where: type, kind: type, media: content })
+    if (type === 'interactive' && isRecord(content) && isRecord(content['header'])) {
+      const header = content['header']
+      const kind = String(header['type'])
+      if (kind in MEDIA_TYPES && isRecord(header[kind])) {
+        found.push({ where: `interactive[header][${kind}]`, kind, media: header[kind] })
+      }
+    }
+    if (type === 'template' && isRecord(content) && Array.isArray(content['components'])) {
+      for (const component of content['components'] as unknown[]) {
+        if (!isRecord(component) || !Array.isArray(component['parameters'])) continue
+        for (const parameter of component['parameters'] as unknown[]) {
+          if (!isRecord(parameter)) continue
+          const kind = String(parameter['type'])
+          if (kind in MEDIA_TYPES && isRecord(parameter[kind])) {
+            found.push({ where: `template parameter ${kind}`, kind, media: parameter[kind] })
+          }
+        }
+      }
+    }
+
+    let unusable = false
+    for (const { where, kind, media } of found) {
+      const { id, link } = media
+      if (typeof id === 'string') {
+        const mimeType = this.#media.mimeTypeOf(id)
+        if (mimeType === undefined) {
+          throw new GraphError(ERROR_CODES.PARAMETER_VALUE_INVALID, {
+            details: `${where}[id] ${id} is not an uploaded media id, or it has expired`,
+          })
+        }
+        // By the base type: `audio/ogg; codecs=opus`, as a received voice
+        // note is described, is the Ogg audio Meta supports.
+        const base = mimeType.split(';')[0]!.trim().toLowerCase()
+        if (!MIME_TYPES_BY_KIND[kind]?.has(base)) {
+          throw new GraphError(ERROR_CODES.MEDIA_UPLOAD_ERROR, {
+            details: `${where}[id] ${id} is ${base}, which is not a supported ${kind} type`,
+          })
+        }
+      }
+      if (typeof link === 'string' && !isWebUrl(link)) unusable = true
+    }
+    return unusable
+  }
+
   #validateTypePayload(type: string, body: Record<string, unknown>): void {
+    if (MEDIA_TYPES[type]) return validateMedia(type, body[type])
+    if (type === 'location') return validateLocation(body['location'])
+    if (type === 'contacts') return validateContacts(body['contacts'])
+    if (type === 'reaction') return validateReaction(body['reaction'])
+
     if (type === 'text') {
       const text = body['text'] as { body?: unknown } | undefined
       if (typeof text?.body !== 'string' || text.body === '') {
         throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
           details: 'Param text[body] is required for type text',
+        })
+      }
+      if (text.body.length > TEXT_BODY_MAX) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: `Param text[body] exceeds the ${TEXT_BODY_MAX} character limit (got ${text.body.length})`,
         })
       }
       return
@@ -509,6 +805,47 @@ export class MessagingService {
     }
   }
 
+  /**
+   * A reaction gets a `sent` status and nothing more: no `delivered`, so no
+   * pricing either. A reaction to a message that is not in this chat, is over
+   * 30 days old, or is itself a reaction fails instead, with 131009.
+   */
+  #scheduleReactionStatus(
+    phoneNumberId: string,
+    wamid: string,
+    waId: string,
+    user: UserIdentity,
+    sentTo: 'phone' | 'user_id',
+    reaction: unknown,
+    bizOpaqueCallbackData: string | undefined,
+  ): void {
+    const { clock, state, scenario, dispatcher } = this.#context
+    const targetId = (reaction as { message_id: string }).message_id
+    const now = clock.now()
+
+    const inbound = state.inbound(targetId)
+    const outbound = state.outbound().find((message) => message.id === targetId)
+    const target =
+      inbound && inbound.phoneNumberId === phoneNumberId && inbound.from === waId
+        ? { at: inbound.receivedAt, reaction: inbound.type === 'reaction' }
+        : outbound && outbound.phoneNumberId === phoneNumberId && outbound.to === waId
+          ? { at: outbound.sentAt, reaction: outbound.type === 'reaction' }
+          : undefined
+    const valid = target !== undefined && !target.reaction && now - target.at <= REACTION_WINDOW_MS
+
+    const at = now + STATUS_DELAYS.sent + scenario.latency()
+    dispatcher.dispatchStatus(phoneNumberId, {
+      messageId: wamid,
+      status: valid ? 'sent' : 'failed',
+      user,
+      sentTo,
+      timestampMs: at,
+      ...(valid ? {} : { errorCode: ERROR_CODES.PARAMETER_VALUE_INVALID }),
+      ...(bizOpaqueCallbackData !== undefined ? { bizOpaqueCallbackData } : {}),
+      atMs: at,
+    })
+  }
+
   #scheduleStatuses(
     phoneNumberId: string,
     wamid: string,
@@ -516,6 +853,7 @@ export class MessagingService {
     sentTo: 'phone' | 'user_id',
     pricing: Record<string, unknown>,
     entryPoint?: EntryPointWindow,
+    bizOpaqueCallbackData?: string,
   ): void {
     const { clock, scenario, dispatcher } = this.#context
 
@@ -546,6 +884,7 @@ export class MessagingService {
         // `conversation` object: v24.0+ omits it outside free entry point
         // windows, which wamock does not open.
         ...(status === 'delivered' ? { pricing } : {}),
+        ...(bizOpaqueCallbackData !== undefined ? { bizOpaqueCallbackData } : {}),
         // Inside a free entry point window the conversation object is back,
         // on `sent` and on `delivered`; its expiration rides on `sent` only.
         ...(entryPoint

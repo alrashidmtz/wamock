@@ -77,7 +77,8 @@ describe('inProcessTransport', () => {
 
     await inProcessTransport(handler)(delivery())
 
-    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ signature: 'sha256=deadbeef' }))
+    // The attempt is passed through, undefined when the caller gave none.
+    expect(handler).toHaveBeenCalledWith(expect.objectContaining({ signature: 'sha256=deadbeef' }), undefined)
   })
 
   it('awaits an async handler before resolving', async () => {

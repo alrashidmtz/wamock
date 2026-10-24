@@ -90,6 +90,23 @@ describe('installGraphInterceptor', () => {
     ])
   })
 
+  it('redirects a media download from lookaside.fbsbx.com, where Meta serves the bytes', async () => {
+    // A media URL taken from `GET /{media_id}` must reach the mock too, or
+    // the download escapes to Meta.
+    const seen: string[] = []
+    restore = installGraphInterceptor({
+      baseUrl: 'http://127.0.0.1:4004',
+      fetchImpl: async (input) => {
+        seen.push(input.toString())
+        return new Response('{}')
+      },
+    })
+
+    await globalThis.fetch('https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1&ext=2&hash=h')
+
+    expect(seen).toEqual(['http://127.0.0.1:4004/whatsapp_business/attachments/?mid=1&ext=2&hash=h'])
+  })
+
   it('accepts a URL object, not just a string', async () => {
     const seen: string[] = []
     restore = installGraphInterceptor({

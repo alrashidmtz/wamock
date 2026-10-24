@@ -30,8 +30,8 @@ describe('buildInboundPayload', () => {
     expect(value.messages?.[0]?.from).toBe('5215555000001')
   })
 
-  it('reports the business number WITH a leading +', () => {
-    expect(payload.entry[0]!.changes[0]!.value.metadata.display_phone_number).toBe('+15550001111')
+  it('reports the business number as digits only, with no +', () => {
+    expect(payload.entry[0]!.changes[0]!.value.metadata.display_phone_number).toBe('15550001111')
   })
 
   it('renders the timestamp as a string of unix SECONDS, not millis', () => {
@@ -93,6 +93,24 @@ describe('buildStatusPayload', () => {
 
   it('renders the timestamp as unix seconds', () => {
     expect(payload.entry[0]!.changes[0]!.value.statuses?.[0]?.timestamp).toBe('1750000120')
+  })
+
+  // Left to Stryker: `failed && errorCode !== undefined` → `failed && true`.
+  // Every caller hands a failed status its code (forceStatus refuses one
+  // without), so the second half only narrows the type.
+  it('attaches errors[] to a failed status only, whatever error code it is handed', () => {
+    for (const status of ['sent', 'delivered', 'read', 'played'] as const) {
+      const built = buildStatusPayload({
+        ...CONTEXT,
+        messageId: 'wamid.OUT1',
+        status,
+        user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+        sentTo: 'phone',
+        timestampMs: 1_750_000_120_000,
+        errorCode: 131026,
+      })
+      expect(built.entry[0]!.changes[0]!.value.statuses?.[0], status).not.toHaveProperty('errors')
+    }
   })
 
   it('attaches errors[] on a failed status', () => {

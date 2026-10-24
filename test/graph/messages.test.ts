@@ -199,3 +199,78 @@ describe('sendMessage — scheduled delivery statuses', () => {
     expect(e.deliverer.log()).toHaveLength(0)
   })
 })
+
+/** The `error_data.details` a Graph error renders, which is where the reason lives. */
+const detailsOf = (fn: () => unknown): string => {
+  try {
+    fn()
+  } catch (err) {
+    return (err as GraphError).toBody('x').error.error_data?.details ?? ''
+  }
+  throw new Error('expected a GraphError')
+}
+
+describe('documented send rules', () => {
+  const text = (body: string, extra: Record<string, unknown> = {}) => ({
+    messaging_product: 'whatsapp',
+    to: '5215555000001',
+    type: 'text',
+    text: { body },
+    ...extra,
+  })
+
+  it('accepts a 4096-character text and refuses 4097', () => {
+    const e = engine()
+    openWindow(e)
+    expect(() => e.sendMessage(e.state.defaultPhoneNumberId, text('x'.repeat(4096)))).not.toThrow()
+    expect(detailsOf(() => e.sendMessage(e.state.defaultPhoneNumberId, text('x'.repeat(4097))))).toMatch(/4096/)
+  })
+
+  it('accepts recipient_type individual, and refuses group, which wamock does not emulate', () => {
+    const e = engine()
+    openWindow(e)
+    expect(() => e.sendMessage(e.state.defaultPhoneNumberId, text('hi', { recipient_type: 'individual' }))).not.toThrow()
+    expect(detailsOf(() => e.sendMessage(e.state.defaultPhoneNumberId, text('hi', { recipient_type: 'group' })))).toMatch(/group/)
+    expect(detailsOf(() => e.sendMessage(e.state.defaultPhoneNumberId, text('hi', { recipient_type: 'everyone' })))).toMatch(/recipient_type/)
+  })
+
+  it('echoes biz_opaque_callback_data on every status of the message', async () => {
+    const e = engine()
+    openWindow(e)
+    const id = e.sendMessage(e.state.defaultPhoneNumberId, text('hi', { biz_opaque_callback_data: 'order-42' })).messages[0]!.id
+    e.clock.advance(60_000)
+    await e.settle()
+    e.forceStatus(id, 'read')
+    e.clock.advance(0)
+    await e.settle()
+
+    const statuses = e.deliverer
+      .log()
+      .map((d) => d.payload.entry[0]!.changes[0]!)
+      .map((c) => (c.field === 'messages' ? c.value.statuses?.[0] : undefined))
+      .filter((s) => s?.id === id)
+    expect(statuses.map((s) => s!.status)).toEqual(['sent', 'delivered', 'read'])
+    expect(statuses.every((s) => s!.biz_opaque_callback_data === 'order-42')).toBe(true)
+  })
+
+  it('takes biz_opaque_callback_data up to Meta’s 512 characters, and nothing but a string', () => {
+    const e = engine()
+    openWindow(e)
+    const send = (opaque: unknown) => () =>
+      e.sendMessage(e.state.defaultPhoneNumberId, text('hi', { biz_opaque_callback_data: opaque }))
+    expect(send('x'.repeat(512))).not.toThrow()
+    for (const opaque of ['x'.repeat(513), 42, { order: 42 }, null]) {
+      expect(detailsOf(send(opaque)), JSON.stringify(opaque)).toMatch(/biz_opaque_callback_data/)
+    }
+    expect(e.state.outbound()).toHaveLength(1)
+  })
+
+  it('leaves biz_opaque_callback_data off when the send had none', async () => {
+    const e = engine()
+    openWindow(e)
+    e.sendMessage(e.state.defaultPhoneNumberId, text('hi'))
+    e.clock.advance(60_000)
+    await e.settle()
+    expect(JSON.stringify(e.deliverer.log().map((d) => d.payload))).not.toContain('biz_opaque_callback_data')
+  })
+})

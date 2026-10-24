@@ -20,11 +20,11 @@ function harness() {
   const clock = new VirtualClock({ mode: 'frozen', start: EPOCH })
   const state = new MockState({ appSecret: 'platform-secret' })
   const scenario = new ScenarioController()
-  const sent: Array<{ body: string; signature: string }> = []
+  const sent: Array<{ body: string; signature: string; payload: unknown }> = []
   const deliverer = new WebhookDeliverer({
     clock,
     transport: async (d) => {
-      sent.push({ body: d.body, signature: d.signature })
+      sent.push({ body: d.body, signature: d.signature, payload: d.payload })
     },
   })
   const dispatcher = new WebhookDispatcher(state, deliverer, scenario)
@@ -141,6 +141,28 @@ describe('dispatchStatus', () => {
 
     const value = JSON.parse(h.sent[0]!.body).entry[0].changes[0].value
     expect(value.statuses[0]).toMatchObject({ id: 'wamid.Y', status: 'read' })
+  })
+
+  it('carries biz_opaque_callback_data only when the send had it, in the payload handed over too', async () => {
+    // In-process consumers read `payload`, not the bytes: a key there set to
+    // undefined is a key the wire body does not have.
+    const h = harness()
+    const status = (bizOpaqueCallbackData?: string) =>
+      h.dispatcher.dispatchStatus(h.state.defaultPhoneNumberId, {
+        messageId: 'wamid.Y',
+        status: 'sent',
+        user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+        sentTo: 'phone',
+        timestampMs: EPOCH,
+        ...(bizOpaqueCallbackData !== undefined ? { bizOpaqueCallbackData } : {}),
+      })
+    status()
+    status('order-42')
+    await flush(h)
+
+    const statuses = h.sent.map((d) => (d.payload as { entry: Array<{ changes: Array<{ value: { statuses: unknown[] } }> }> }).entry[0]!.changes[0]!.value.statuses[0])
+    expect(statuses[0]).not.toHaveProperty('biz_opaque_callback_data')
+    expect(statuses[1]).toHaveProperty('biz_opaque_callback_data', 'order-42')
   })
 
   it('does nothing for a number it does not host', async () => {

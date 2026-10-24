@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 
+import { countryOf } from './phone.js'
+
 /**
  * WhatsApp users as a business sees them: a business-scoped user ID (BSUID),
  * an optional username, and a phone number that is not always disclosed.
@@ -25,28 +27,6 @@ import { createHash } from 'node:crypto'
 
 /** How long contact through a phone number keeps that number disclosed. */
 export const PHONE_SHARING_MS = 30 * 24 * 60 * 60 * 1000
-
-/**
- * E.164 country calling codes are prefix-free by design (no code starts
- * another), so the first match is the only match and order does not matter.
- */
-export const COUNTRY_BY_CALLING_CODE: Array<[string, string]> = [
-  ['1', 'US'], ['7', 'RU'], ['20', 'EG'], ['27', 'ZA'], ['30', 'GR'], ['31', 'NL'],
-  ['32', 'BE'], ['33', 'FR'], ['34', 'ES'], ['36', 'HU'], ['39', 'IT'], ['40', 'RO'],
-  ['41', 'CH'], ['43', 'AT'], ['44', 'GB'], ['45', 'DK'], ['46', 'SE'], ['47', 'NO'],
-  ['48', 'PL'], ['49', 'DE'], ['51', 'PE'], ['52', 'MX'], ['53', 'CU'], ['54', 'AR'],
-  ['55', 'BR'], ['56', 'CL'], ['57', 'CO'], ['58', 'VE'], ['60', 'MY'], ['61', 'AU'],
-  ['62', 'ID'], ['63', 'PH'], ['64', 'NZ'], ['65', 'SG'], ['66', 'TH'], ['81', 'JP'],
-  ['82', 'KR'], ['84', 'VN'], ['86', 'CN'], ['90', 'TR'], ['91', 'IN'], ['92', 'PK'],
-  ['212', 'MA'], ['234', 'NG'], ['254', 'KE'], ['351', 'PT'], ['353', 'IE'],
-  ['502', 'GT'], ['503', 'SV'], ['504', 'HN'], ['505', 'NI'], ['506', 'CR'],
-  ['507', 'PA'], ['509', 'HT'], ['591', 'BO'], ['593', 'EC'], ['595', 'PY'],
-  ['598', 'UY'], ['852', 'HK'], ['880', 'BD'], ['962', 'JO'], ['966', 'SA'],
-  ['971', 'AE'], ['972', 'IL'], ['974', 'QA'],
-]
-
-const countryOf = (waId: string): string =>
-  COUNTRY_BY_CALLING_CODE.find(([code]) => waId.startsWith(code))?.[1] ?? 'ZZ'
 
 export interface UserProfile {
   name?: string

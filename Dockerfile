@@ -9,7 +9,7 @@
 # Without this pin, a multi-arch build runs `npm ci` and `tsc` again under QEMU
 # emulation for arm64. That measured over 19 minutes and produced byte-identical
 # output to the native run: entirely wasted work on every release.
-FROM --platform=$BUILDPLATFORM node:22-alpine AS build
+FROM --platform=$BUILDPLATFORM node:26-alpine AS build
 WORKDIR /app
 
 COPY package*.json ./
@@ -29,7 +29,7 @@ RUN npm run build
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 
 # --- runtime (per architecture) ----------------------------------------------
-FROM node:22-alpine
+FROM node:26-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 

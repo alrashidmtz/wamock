@@ -307,9 +307,59 @@ describe('forcing a status by hand', () => {
     expect(failed.errors?.[0]).toMatchObject({ code: 131026 })
   })
 
+  it('takes an error code only with failed, the one status Meta gives errors', async () => {
+    const { e, received } = await harness()
+    const voice = { messaging_product: 'whatsapp', to: CUSTOMER, type: 'audio', audio: { link: 'https://example.com/n.ogg', voice: true } }
+    const wamid = e.sendMessage(e.state.defaultPhoneNumberId, voice).messages[0]!.id
+    received.length = 0
+    for (const status of ['sent', 'delivered', 'read', 'played'] as const) {
+      expect(codeOf(() => e.forceStatus(wamid, status, 131026))).toBe(100)
+    }
+    // And failed always takes one: a failed status without errors does not exist.
+    expect(codeOf(() => e.forceStatus(wamid, 'failed'))).toBe(100)
+    e.clock.advance(0)
+    await e.settle()
+    expect(statusesFrom(received)).toEqual([])
+  })
+
   it('rejects a wamid the mock never issued', async () => {
     const { e } = await harness()
     expect(codeOf(() => e.forceStatus('wamid.NOPE', 'read'))).toBe(100)
+  })
+
+  it('plays a voice message, which Meta reports with its own played status', async () => {
+    const { e, received } = await harness()
+    const voice = { messaging_product: 'whatsapp', to: CUSTOMER, type: 'audio', audio: { link: 'https://example.com/note.ogg', voice: true } }
+    const wamid = e.sendMessage(e.state.defaultPhoneNumberId, voice).messages[0]!.id
+    received.length = 0
+
+    e.forceStatus(wamid, 'played')
+    e.clock.advance(0)
+    await e.settle()
+
+    const played = statusesFrom(received)
+    expect(played.map((s) => [s.id, s.status])).toEqual([[wamid, 'played']])
+    // Meta's BSUID reference: contacts only on sent, delivered and read.
+    expect(JSON.parse(received[0]!).entry[0].changes[0].value).not.toHaveProperty('contacts')
+    expect(played[0]).not.toHaveProperty('pricing')
+    expect(played[0]).not.toHaveProperty('errors')
+  })
+
+  it('refuses played for anything but a voice message: Meta never sends it there', async () => {
+    const { e, received } = await harness()
+    const textId = e.sendMessage(e.state.defaultPhoneNumberId, text).messages[0]!.id
+    const audio = { messaging_product: 'whatsapp', to: CUSTOMER, type: 'audio', audio: { link: 'https://example.com/song.mp3' } }
+    const audioId = e.sendMessage(e.state.defaultPhoneNumberId, audio).messages[0]!.id
+    const basic = { ...audio, audio: { link: 'https://example.com/song.mp3', voice: false } }
+    const basicId = e.sendMessage(e.state.defaultPhoneNumberId, basic).messages[0]!.id
+    // A text that happens to carry a stray `audio` key is still a text.
+    const strayId = e.sendMessage(e.state.defaultPhoneNumberId, { ...text, audio: { voice: true } }).messages[0]!.id
+    received.length = 0
+
+    for (const id of [textId, audioId, basicId, strayId]) expect(codeOf(() => e.forceStatus(id, 'played'))).toBe(100)
+    e.clock.advance(0)
+    await e.settle()
+    expect(statusesFrom(received).filter((s) => s.status === 'played')).toEqual([])
   })
 })
 

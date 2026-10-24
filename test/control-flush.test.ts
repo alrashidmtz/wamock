@@ -304,3 +304,352 @@ describe('flush rounds', () => {
     }
   })
 })
+
+let secondGate: Promise<void> = Promise.resolve()
+
+describe('helpers waiting on one another', () => {
+  async function blockable() {
+    const { createWamock } = await import('../src/lib.js')
+    const bodies: string[] = []
+    let gate: Promise<void> | undefined
+    let open: () => void = () => {}
+    const mock = await createWamock({
+      appSecret: 's',
+      start: 1_750_000_000_000,
+      onWebhook: async (d) => {
+        const text: string | undefined = JSON.parse(d.body).entry[0]?.changes[0]?.value.messages?.[0]?.text?.body
+        if (text === 'old') await gate
+        if (text === 'second') await secondGate
+        if (text) bodies.push(text)
+      },
+    })
+    const block = () => {
+      gate = new Promise<void>((resolve) => (open = resolve))
+    }
+    return { mock, bodies, block, release: () => open() }
+  }
+
+  it('delivers work a reset left behind while a flush was waiting', async () => {
+    const { mock, bodies, block, release } = await blockable()
+    try {
+      block()
+      const old = mock.inbound({ from: '5215555000001', text: 'old' })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      // reset() waits for the old delivery in flight, so it is not awaited
+      // until the receiver is released.
+      const reset = mock.reset()
+      const fresh = mock.inbound({ from: '5215555000001', text: 'new' })
+      release()
+      await Promise.all([old, reset, fresh])
+      expect(bodies).toContain('new')
+    } finally {
+      await mock.close()
+    }
+  })
+
+  it('makes time.advance wait for what it set off, not for another helper’s delivery', async () => {
+    const { mock, bodies, block, release } = await blockable()
+    let openSecond: () => void = () => {}
+    const second = new Promise<void>((resolve) => (openSecond = resolve))
+    try {
+      block()
+      const old = mock.inbound({ from: '5215555000001', text: 'old' })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+
+      // A message the advance will deliver, whose receiver is slow too.
+      const slow = mock.engine.simulateInbound({ from: '5215555000002', message: { type: 'text', text: { body: 'second' } } })
+      void slow
+      let advanced = false
+      secondGate = second
+      const advance = mock.time.advance(0).then(() => (advanced = true))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(advanced).toBe(false)
+
+      // Done once ITS delivery is, while the other helper's is still held.
+      openSecond()
+      await advance
+      expect(bodies).toEqual(['second'])
+      release()
+      await old
+      expect(bodies).toEqual(['second', 'old'])
+    } finally {
+      await mock.close()
+    }
+  })
+})
+
+describe('time.advance from inside a handler', () => {
+  it('returns at once, leaving the running flush to deliver what it set off', async () => {
+    const { createWamock } = await import('../src/lib.js')
+    const seen: string[] = []
+    const mock = await createWamock({
+      appSecret: 's',
+      start: 1_750_000_000_000,
+      settleTimeoutMs: 2000,
+      onWebhook: async (d) => {
+        const field = d.payload.entry[0]!.changes[0]!.field
+        seen.push(field)
+        // Awaiting something first, as a real handler does: by then its own
+        // delivery is in flight, and waiting on in-flight work would wait on
+        // itself until the timeout.
+        if (field === 'messages' && seen.length === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          await mock.time.advance(1000)
+        }
+      },
+    })
+    try {
+      const started = performance.now()
+      await mock.inbound({ from: '5215555000001', text: 'hola' })
+      expect(performance.now() - started).toBeLessThan(1000)
+    } finally {
+      await mock.close()
+    }
+  })
+})
+
+describe('a handler never waits for its own delivery', () => {
+  it('lets a status handler fired by time.advance call time.advance itself', async () => {
+    const { createWamock } = await import('../src/lib.js')
+    let handled = false
+    const mock = await createWamock({
+      appSecret: 's',
+      start: 1_750_000_000_000,
+      settleTimeoutMs: 2000,
+      onWebhook: async (d) => {
+        const value = JSON.parse(d.body).entry[0].changes[0].value
+        if (value.statuses?.[0]?.status !== 'sent') return
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        await mock.time.advance(0)
+        handled = true
+      },
+    })
+    try {
+      await mock.inbound({ from: '5215555000001', text: 'hola' })
+      await mock.send({ to: '5215555000001', text: 'respuesta' })
+      const started = performance.now()
+      await mock.time.advance(50)
+      expect(performance.now() - started).toBeLessThan(1000)
+      expect(handled).toBe(true)
+    } finally {
+      await mock.close()
+    }
+  })
+
+  it('still waits for other deliveries, even from work a finished delivery left behind', async () => {
+    const { createWamock } = await import('../src/lib.js')
+    let open: () => void = () => {}
+    const gate = new Promise<void>((resolve) => (open = resolve))
+    let deferred: Promise<void> | undefined
+    let advanced = false
+    const mock = await createWamock({
+      appSecret: 's',
+      start: 1_750_000_000_000,
+      onWebhook: async (d) => {
+        const value = JSON.parse(d.body).entry[0].changes[0].value
+        if (value.messages?.[0]) {
+          // Left running after this delivery finishes.
+          deferred = new Promise<void>((resolve) => setTimeout(resolve, 20)).then(async () => {
+            await mock.time.advance(50)
+            advanced = true
+          })
+          return
+        }
+        if (value.statuses?.[0]?.status === 'sent') await gate
+      },
+    })
+    try {
+      await mock.inbound({ from: '5215555000001', text: 'hola' })
+      void mock.send({ to: '5215555000001', text: 'respuesta' })
+      await new Promise((resolve) => setTimeout(resolve, 60))
+      expect(advanced).toBe(false)
+      open()
+      await deferred
+      expect(advanced).toBe(true)
+    } finally {
+      await mock.close()
+    }
+  })
+})
+
+describe('waits only point forward', () => {
+  it('lets duplicate deliveries both call time.advance without waiting on each other', async () => {
+    const { createWamock } = await import('../src/lib.js')
+    let done = 0
+    const mock = await createWamock({
+      appSecret: 's',
+      start: 1_750_000_000_000,
+      settleTimeoutMs: 2000,
+      onWebhook: async (d) => {
+        if (!JSON.parse(d.body).entry[0].changes[0].value.messages) return
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        await mock.time.advance(0)
+        done++
+      },
+    })
+    try {
+      await mock.scenario({ duplicateWebhooks: true })
+      const started = performance.now()
+      await mock.inbound({ from: '5215555000001', text: 'hola' })
+      expect(performance.now() - started).toBeLessThan(1000)
+      expect(done).toBe(2)
+    } finally {
+      await mock.close()
+    }
+  })
+
+  it('answers a receiver that calls the control API mid-delivery without waiting on that delivery', async () => {
+    const { WamockEngine } = await import('../src/core/engine.js')
+    const { createServer } = await import('../src/server.js')
+    let app: Awaited<ReturnType<typeof createServer>> | undefined
+    let answeredIn = Number.POSITIVE_INFINITY
+    const engine = new WamockEngine({
+      appSecret: 's',
+      mode: 'frozen',
+      start: 1_750_000_000_000,
+      transport: async () => {
+        const started = performance.now()
+        await app!.inject({ method: 'POST', url: '/__mock/time/advance', payload: '{"ms":1}' })
+        answeredIn = performance.now() - started
+      },
+    })
+    app = createServer(engine, { settleTimeoutMs: 2000 })
+    await app.ready()
+    try {
+      engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
+      engine.clock.advance(0)
+      await engine.settle()
+      expect(answeredIn).toBeLessThan(1000)
+      expect(engine.deliverer.log().map((r) => r.ok)).toEqual([true])
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+describe('a control request and the deliveries it set off', () => {
+  async function server() {
+    const { WamockEngine } = await import('../src/core/engine.js')
+    const { createServer } = await import('../src/server.js')
+    const gates = new Map<string, Promise<void>>()
+    const opens = new Map<string, () => void>()
+    const hold = (text: string) => gates.set(text, new Promise<void>((resolve) => opens.set(text, resolve)))
+    const done: string[] = []
+    const engine = new WamockEngine({
+      appSecret: 's',
+      mode: 'frozen',
+      start: 1_750_000_000_000,
+      transport: async (d) => {
+        const text: string | undefined = JSON.parse(d.body).entry[0].changes[0].value.messages?.[0]?.text?.body
+        if (text) await gates.get(text)
+        if (text) done.push(text)
+      },
+    })
+    const app = createServer(engine, { settleTimeoutMs: 2000 })
+    return { engine, app, hold, open: (text: string) => opens.get(text)!(), done }
+  }
+
+  it('waits for the delivery it fired even while another request’s flush is running', async () => {
+    const { engine, app, hold, open, done } = await server()
+    await app.ready()
+    try {
+      hold('first')
+      hold('second')
+      const first = app.inject({ method: 'POST', url: '/__mock/inbound', payload: '{"from":"5215555000001","text":"first"}' })
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      // Due now; the time/advance request is what fires it.
+      engine.simulateInbound({ from: '5215555000002', message: { type: 'text', text: { body: 'second' } } })
+      let answered = false
+      const second = app
+        .inject({ method: 'POST', url: '/__mock/time/advance', payload: '{"ms":1}' })
+        .then(() => (answered = true))
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      expect(answered).toBe(false)
+      open('second')
+      await second
+      expect(done).toEqual(['second'])
+      open('first')
+      await first
+    } finally {
+      await app.close()
+    }
+  })
+
+  it('reports in GET /__mock/state the delivery that started as the request arrived', async () => {
+    const { engine, app, hold, open } = await server()
+    // Runs after wamock's own onRequest hook: the attempt starts once the
+    // request's starting point is taken, and before its flush. Its receiver
+    // is slow, so a snapshot that did not wait for it would read 0.
+    app.addHook('onRequest', async (request) => {
+      if (request.url === '/__mock/state') {
+        hold('hola')
+        setTimeout(() => open('hola'), 20)
+        engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
+        engine.clock.advance(0)
+      }
+    })
+    await app.ready()
+    try {
+      const state = await app.inject({ method: 'GET', url: '/__mock/state' })
+      expect(state.json().webhooksDelivered).toBe(1)
+    } finally {
+      await app.close()
+    }
+  })
+})
+
+describe('a receiver that answers every message with another', () => {
+  it('fails as fast as before: waits from inside deliveries cost nothing', async () => {
+    // Each handler calls mock.inbound, whose message the clock fires inside
+    // the same drain, until the clock's own iteration cap stops it. Waiting
+    // must not scan every delivery still in flight on each of those calls:
+    // done that way, this took 45s to over two minutes instead of about two.
+    const { createWamock } = await import('../src/lib.js')
+    const mock = await createWamock({
+      appSecret: 's',
+      start: 1_750_000_000_000,
+      onWebhook: async (d) => {
+        if (!JSON.parse(d.body).entry[0].changes[0].value.messages) return
+        await mock.inbound({ from: '5215555000001', text: 'again' })
+      },
+    })
+    try {
+      const started = performance.now()
+      await expect(mock.inbound({ from: '5215555000001', text: 'start' })).rejects.toThrow(/timer iterations/)
+      expect(performance.now() - started).toBeLessThan(5_000)
+    } finally {
+      await mock.close()
+    }
+  }, 60_000)
+})
+
+describe('earlier deliveries do not use up a later call’s rounds', () => {
+  it('answers GET /__mock/state when 105 earlier deliveries finish one by one', async () => {
+    const { WamockEngine } = await import('../src/core/engine.js')
+    const { createServer } = await import('../src/server.js')
+    const releases: Array<() => void> = []
+    const engine = new WamockEngine({
+      appSecret: 's',
+      mode: 'frozen',
+      start: 1_750_000_000_000,
+      transport: () => new Promise<void>((resolve) => releases.push(resolve)),
+    })
+    const app = createServer(engine, { settleTimeoutMs: 2000 })
+    await app.ready()
+    try {
+      for (let i = 0; i < 105; i++) {
+        engine.simulateInbound({ from: `52155550${String(i).padStart(5, '0')}`, message: { type: 'text', text: { body: 'x' } } })
+      }
+      engine.clock.advance(0)
+      const state = app.inject({ method: 'GET', url: '/__mock/state' })
+      // One per tick: each completion would have counted as a round.
+      for (const release of releases) {
+        release()
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      }
+      expect((await state).statusCode).toBe(200)
+    } finally {
+      await app.close()
+    }
+  })
+})

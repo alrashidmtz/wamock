@@ -277,3 +277,128 @@ describe('POST /__mock/reset', () => {
     expect(received).toHaveLength(0)
   })
 })
+
+// Mutants left alive on purpose in server.ts: the `x !== undefined ? { x } : {}`
+// spreads forced true pass `x: undefined`, which every consumer treats as
+// absent; the Host header is always present over HTTP/1.1; and the `details`
+// strings of the multipart and limit errors are debug text, not contract.
+describe('routing and the token check', () => {
+  const expiredToken = (): string => {
+    const token = engine.issueToken({ kind: 'short' }).access_token
+    engine.clock.advance(3 * 60 * 60 * 1000)
+    return token
+  }
+
+  it.each([
+    ['POST', '/notaversion/PNID/messages'],
+    ['GET', '/notaversion/oauth/access_token'],
+    ['GET', '/notaversion/debug_token'],
+    ['POST', '/notaversion/WABA/subscribed_apps'],
+    ['DELETE', '/notaversion/WABA/subscribed_apps'],
+    ['GET', '/notaversion/WABA/subscribed_apps'],
+    ['GET', '/notaversion/WABA/phone_numbers'],
+    ['POST', '/notaversion/PNID/smb_app_data'],
+    ['POST', '/notaversion/PNID/media'],
+    ['GET', '/notaversion/OBJECT'],
+    ['DELETE', '/notaversion/OBJECT'],
+    ['GET', '/notaversion/WABA/message_templates'],
+    ['POST', '/notaversion/WABA/message_templates'],
+    ['DELETE', '/notaversion/WABA/message_templates'],
+  ] as const)('404s %s %s, whatever token it carries', async (method, path) => {
+    const url = path.replace('PNID', engine.state.defaultPhoneNumberId).replace('WABA', engine.state.defaultWabaId)
+    const bodyless = method === 'GET' || method === 'DELETE'
+    const res = await app.inject({
+      method,
+      url,
+      headers: { authorization: `Bearer ${expiredToken()}`, ...(bodyless ? {} : { 'content-type': 'application/json' }) },
+      ...(bodyless ? {} : { payload: '{}' }),
+    })
+    expect(res.statusCode).toBe(404)
+  })
+
+  it('refuses a multipart body it cannot parse with a Meta-shaped 400', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v26.0/${engine.state.defaultPhoneNumberId}/media`,
+      headers: { 'content-type': 'multipart/form-data; boundary=wamock' },
+      payload: 'not multipart at all',
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error.code).toBe(100)
+  })
+
+  it('takes the control API’s bodies as JSON only, never as multipart', async () => {
+    const form = new FormData()
+    form.set('from', '5215555000001')
+    form.set('text', 'hola')
+    const request = new Request('http://localhost/', { method: 'POST', body: form })
+    const res = await app.inject({
+      method: 'POST',
+      url: '/__mock/inbound',
+      headers: { 'content-type': request.headers.get('content-type')! },
+      payload: Buffer.from(await request.arrayBuffer()),
+    })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error.code).toBe(100)
+    expect(received).toHaveLength(0)
+  })
+})
+
+describe('media scoped to a phone_number_id', () => {
+  // Meta's media reference: with `phone_number_id`, the call is processed only
+  // when the media belongs to that business number.
+  const twoNumbers = () => {
+    const other = engine.createSignup().phone_number_id
+    const { id } = engine.uploadMedia(engine.state.defaultPhoneNumberId, {
+      messaging_product: 'whatsapp',
+      type: 'image/jpeg',
+      file: { bytes: Buffer.from('x') },
+    })
+    return { other, id }
+  }
+
+  it('reads the media only through the number it belongs to', async () => {
+    const { other, id } = twoNumbers()
+    const wrong = await get(`/v26.0/${id}?phone_number_id=${other}`)
+    expect(wrong.statusCode).toBe(400)
+    expect(wrong.json().error.message).toMatch(/^Unsupported get request\. Object with ID '/)
+    expect((await get(`/v26.0/${id}?phone_number_id=${engine.state.defaultPhoneNumberId}`)).statusCode).toBe(200)
+  })
+
+  it('deletes the media only through the number it belongs to', async () => {
+    const { other, id } = twoNumbers()
+    const wrong = await app.inject({ method: 'DELETE', url: `/v26.0/${id}?phone_number_id=${other}` })
+    expect(wrong.statusCode).toBe(400)
+    expect(wrong.json().error.message).toMatch(/^Unsupported delete request\. Object with ID '/)
+    const right = await app.inject({ method: 'DELETE', url: `/v26.0/${id}?phone_number_id=${engine.state.defaultPhoneNumberId}` })
+    expect(right.json()).toEqual({ success: true })
+  })
+})
+
+describe('the media download URL', () => {
+  it('names the verb when a business token reaches for another tenant’s bytes', async () => {
+    const a = engine.createSignup()
+    const b = engine.createSignup()
+    const { access_token: token } = engine.exchangeCode(engine.state.defaultAppId, SECRET, a.code)
+    const { id } = engine.uploadMedia(b.phone_number_id, { messaging_product: 'whatsapp', type: 'image/jpeg', file: { bytes: Buffer.from('x') } })
+    const url = new URL(engine.getMedia(id, { baseUrl: 'http://localhost' })['url'] as string)
+    const res = await app.inject({ method: 'GET', url: url.pathname + url.search, headers: { authorization: `Bearer ${token}` } })
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error.message).toMatch(/^Unsupported get request\. Object with ID '/)
+  })
+
+  it('checks the token even when the URL names no media', async () => {
+    const { id } = engine.uploadMedia(engine.state.defaultPhoneNumberId, {
+      messaging_product: 'whatsapp',
+      type: 'image/jpeg',
+      file: { bytes: Buffer.from('x') },
+    })
+    const url = new URL(engine.getMedia(id, { baseUrl: 'http://localhost' })['url'] as string)
+    url.searchParams.delete('mid')
+    const token = engine.issueToken({ kind: 'short' }).access_token
+    engine.clock.advance(3 * 60 * 60 * 1000)
+    const res = await app.inject({ method: 'GET', url: url.pathname + url.search, headers: { authorization: `Bearer ${token}` } })
+    expect(res.statusCode).toBe(401)
+    expect(res.json().error.code).toBe(190)
+  })
+})

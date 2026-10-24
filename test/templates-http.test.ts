@@ -152,3 +152,52 @@ describe('POST /__mock/templates/{name}/{language}/recategorize', () => {
     )
   })
 })
+
+describe('GET /{version}/{waba_id}/message_templates pages like Graph', () => {
+  const list = (query = '', version = 'v26.0') => app.inject({ method: 'GET', url: `/${version}/${waba}/message_templates${query}` })
+  const create = async (count: number) => {
+    for (let i = 0; i < count; i++) await post(`/v26.0/${waba}/message_templates`, body({ name: `t_${String(i).padStart(2, '0')}` }))
+  }
+  const names = (res: LightMyRequestResponse) => res.json().data.map((t: { name: string }) => t.name)
+
+  it('answers 25 a page by default, with a next link to the rest', async () => {
+    // An integration that never follows paging.next loses every template past
+    // the 25th in production; it should here too.
+    await create(30)
+    const first = await list()
+    expect(first.json().data).toHaveLength(25)
+    const next = new URL(first.json().paging.next)
+    expect(next.pathname).toBe(`/v26.0/${waba}/message_templates`)
+    const rest = await list(next.search)
+    expect(names(rest)).toEqual(['t_25', 't_26', 't_27', 't_28', 't_29'])
+    expect(rest.json().paging).not.toHaveProperty('next')
+    expect(rest.json().paging.previous).toBeDefined()
+  })
+
+  it('walks back with before, and keeps limit and name in its links', async () => {
+    await create(5)
+    const page = await list('?limit=2&after=' + (await list('?limit=2')).json().paging.cursors.after)
+    expect(names(page)).toEqual(['t_02', 't_03'])
+    const back = new URL(page.json().paging.previous)
+    expect(back.searchParams.get('limit')).toBe('2')
+    expect(names(await list(back.search))).toEqual(['t_00', 't_01'])
+
+    await post(`/v26.0/${waba}/message_templates`, body({ name: 't_01', language: 'en_US' }))
+    const named = await list('?name=t_01&limit=1')
+    expect(names(named)).toEqual(['t_01'])
+    expect(new URL(named.json().paging.next).searchParams.get('name')).toBe('t_01')
+  })
+
+  it('answers a cursor that names no template with 131059 from v24, as Meta’s changelog says', async () => {
+    await create(2)
+    const res = await list('?after=bm90LWEtdGVtcGxhdGU')
+    expect(res.statusCode).toBe(400)
+    expect(res.json().error).toMatchObject({ code: 131059, message: '(#131059) Invalid pagination cursor' })
+    expect((await list('?before=bm90LWEtdGVtcGxhdGU', 'v24.0')).json().error.code).toBe(131059)
+    expect((await list('?after=bm90LWEtdGVtcGxhdGU', 'v23.0')).json().error.code).toBe(100)
+  })
+
+  it('refuses a limit outside 1 to 100, like every paged edge', async () => {
+    for (const limit of ['0', '101', 'x']) expect((await list(`?limit=${limit}`)).json().error.code).toBe(100)
+  })
+})

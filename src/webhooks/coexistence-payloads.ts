@@ -1,4 +1,4 @@
-import { toDisplayPhoneNumber } from '../core/phone.js'
+import { toWebhookDisplayNumber } from '../core/phone.js'
 import type { AccountChange, UserIdentity, WebhookContact, WebhookPayload } from './payloads.js'
 
 /**
@@ -18,7 +18,7 @@ interface NumberContext {
 const toMetaTimestamp = (ms: number): string => String(Math.floor(ms / 1000))
 
 const metadata = (ctx: NumberContext) => ({
-  display_phone_number: toDisplayPhoneNumber(ctx.displayPhoneNumber),
+  display_phone_number: toWebhookDisplayNumber(ctx.displayPhoneNumber),
   phone_number_id: ctx.phoneNumberId,
 })
 
@@ -141,8 +141,8 @@ export function buildMessageEchoPayload(
     contacts: [contactOf(user)],
     message_echoes: [
       {
-        // The business number, digits only, as in Meta's example.
-        from: options.displayPhoneNumber,
+        // The business number, digits only like everywhere in a webhook.
+        from: toWebhookDisplayNumber(options.displayPhoneNumber),
         ...(user.phoneShared ? { to: user.waId } : {}),
         to_user_id: user.userId,
         id: options.messageId,
@@ -206,7 +206,7 @@ export function buildHistoryPayload(
                   history_context: { status: 'READ' },
                 }
               : {
-                  from: options.displayPhoneNumber,
+                  from: toWebhookDisplayNumber(options.displayPhoneNumber),
                   ...(user.phoneShared ? { to: user.waId } : {}),
                   id: message.id,
                   timestamp: toMetaTimestamp(message.atMs),

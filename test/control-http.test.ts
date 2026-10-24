@@ -121,6 +121,25 @@ describe('POST /__mock/statuses', () => {
     expect(statuses().find((s) => s.status === 'failed')?.errors?.[0]?.code).toBe(131026)
   })
 
+  it('drives a voice message to played, and refuses it for a text', async () => {
+    await openWindow()
+    const voice = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, {
+      messaging_product: 'whatsapp',
+      to: CUSTOMER,
+      type: 'audio',
+      audio: { link: 'https://example.com/note.ogg', voice: true },
+    })
+    const textId = (await sendText()).json().messages[0].id
+    received.length = 0
+
+    expect((await post('/__mock/statuses', { id: voice.json().messages[0].id, status: 'played' })).statusCode).toBe(200)
+    expect(statuses().map((s) => s.status)).toEqual(['played'])
+
+    const refused = await post('/__mock/statuses', { id: textId, status: 'played' })
+    expect(refused.statusCode).toBe(400)
+    expect(refused.json().error.code).toBe(100)
+  })
+
   it('rejects an unknown status value', async () => {
     const res = await post('/__mock/statuses', { id: 'wamid.X', status: 'pondering' })
     expect(res.statusCode).toBe(400)
@@ -133,30 +152,70 @@ describe('POST /__mock/statuses', () => {
   })
 })
 
-describe('media endpoints', () => {
-  it('uploads and then resolves media metadata', async () => {
-    const upload = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/media`, {
-      messaging_product: 'whatsapp',
-      type: 'image/jpeg',
+
+describe('POST /__mock/inbound — each message type', () => {
+  it('takes a Coexistence customer’s edit and revoke, and refuses them elsewhere', async () => {
+    const tenant = (await post('/__mock/embedded-signup', { coexistence: true, subscribed: true })).json()
+    const original = (await post('/__mock/inbound', { from: CUSTOMER, phone_number_id: tenant.phone_number_id, text: 'hola' })).json()
+    const edit = await post('/__mock/inbound', {
+      from: CUSTOMER,
+      phone_number_id: tenant.phone_number_id,
+      edit: { message_id: original.message_id, text: 'hola!' },
     })
-    expect(upload.statusCode).toBe(200)
+    expect(edit.statusCode).toBe(200)
+    expect(JSON.parse(received.at(-1)!).entry[0].changes[0].value.messages[0].edit.original_message_id).toBe(original.message_id)
 
-    const res = await app.inject({ method: 'GET', url: `/v19.0/${upload.json().id}` })
-
-    expect(res.statusCode).toBe(200)
-    expect(res.json()).toMatchObject({ messaging_product: 'whatsapp', mime_type: 'image/jpeg' })
+    const plain = (await post('/__mock/inbound', { from: CUSTOMER, text: 'hola' })).json()
+    expect((await post('/__mock/inbound', { from: CUSTOMER, revoke: { message_id: plain.message_id } })).statusCode).toBe(400)
   })
 
-  it('reports an expired media id as gone', async () => {
-    const upload = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/media`, {
-      messaging_product: 'whatsapp',
-      type: 'image/jpeg',
+  const lastMessage = () => JSON.parse(received.at(-1)!).entry[0].changes[0].value.messages[0]
+
+  it('stores the bytes given as base64 `data`, so the media downloads as sent', async () => {
+    const bytes = Buffer.from('%PDF-1.4 the real file')
+    const res = await post('/__mock/inbound', {
+      from: CUSTOMER,
+      document: { filename: 'r.pdf', mime_type: 'application/pdf', data: bytes.toString('base64') },
     })
-    engine.clock.advance(10 * 60 * 1000)
+    expect(res.statusCode).toBe(200)
+    const message = lastMessage()
+    expect(message).toMatchObject({ type: 'document', document: { filename: 'r.pdf', mime_type: 'application/pdf' } })
+    const url = new URL(engine.getMedia(message.document.id)['url'] as string)
+    expect(engine.downloadMedia(Object.fromEntries(url.searchParams))?.bytes.equals(bytes)).toBe(true)
+  })
 
-    const res = await app.inject({ method: 'GET', url: `/v19.0/${upload.json().id}` })
+  it('delivers a location, contacts and an unsupported message under their own type', async () => {
+    await post('/__mock/inbound', { from: CUSTOMER, location: { latitude: 1, longitude: 2 } })
+    expect(lastMessage()).toMatchObject({ type: 'location', location: { latitude: 1, longitude: 2 } })
 
-    expect(res.statusCode).toBe(400)
-    expect(res.json().error.error_data.details).toMatch(/expired/i)
+    const contacts = [{ name: { formatted_name: 'Ana' } }]
+    await post('/__mock/inbound', { from: CUSTOMER, contacts })
+    expect(lastMessage()).toMatchObject({ type: 'contacts', contacts })
+
+    expect((await post('/__mock/inbound', { from: CUSTOMER, unsupported: { type: 'edit' } })).statusCode).toBe(200)
+    expect(lastMessage()).toMatchObject({ type: 'unsupported', unsupported: { type: 'edit' } })
+  })
+})
+
+describe('POST /__mock/quality', () => {
+  it.each(['RED', 'YELLOW', 'GREEN', 'UNKNOWN'] as const)('takes %s, one of Meta’s quality ratings', async (rating) => {
+    expect((await post('/__mock/quality', { quality_rating: rating })).statusCode).toBe(200)
+    expect(engine.state.phoneNumber(engine.state.defaultPhoneNumberId)?.qualityRating).toBe(rating)
+  })
+})
+
+describe('the control API and Graph tokens', () => {
+  it('ignores an Authorization header, even one carrying an expired wamock token', async () => {
+    // A test harness often sets one header on every request it makes.
+    const token = engine.issueToken({ kind: 'short' }).access_token
+    engine.clock.advance(3 * 60 * 60 * 1000)
+    const res = await app.inject({
+      method: 'POST',
+      url: '/__mock/inbound',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
+      payload: JSON.stringify({ from: CUSTOMER, text: 'hola' }),
+    })
+    expect(res.statusCode).toBe(200)
+    expect(received).toHaveLength(1)
   })
 })

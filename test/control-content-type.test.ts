@@ -115,7 +115,7 @@ describe('control API accepts a JSON body whatever curl labels it', () => {
     expect(JSON.stringify(res.json())).toMatch(/JSON/i)
   })
 
-  it('leaves the Graph routes strict, since Meta is the contract there', async () => {
+  it('reads a Graph body as the form it is labelled, the way Meta does', async () => {
     // The body is complete and the window is open, so this send would succeed
     // if the body were read. An incomplete body would have failed for its own
     // reasons and proved nothing — mutation testing caught exactly that: the
@@ -142,14 +142,23 @@ describe('control API accepts a JSON body whatever curl labels it', () => {
     })
     expect(accepted.statusCode, 'the same body must succeed as JSON').toBe(200)
 
-    const rejected = await app.inject({
-      method: 'POST',
-      url: '/v19.0/PNID_DEFAULT/messages',
-      headers: FORM,
-      payload,
-    })
-    expect(rejected.statusCode).toBe(400)
-    expect(JSON.stringify(rejected.json())).toMatch(/Unsupported content type/)
+    // Meta's Messages API accepts form-urlencoded, with nested objects as
+    // JSON-valued fields. A real form send works...
+    const form = new URLSearchParams({
+      messaging_product: 'whatsapp',
+      to: '5215555000001',
+      type: 'text',
+      text: JSON.stringify({ body: 'hola' }),
+    }).toString()
+    const asForm = await app.inject({ method: 'POST', url: '/v19.0/PNID_DEFAULT/messages', headers: FORM, payload: form })
+    expect(asForm.statusCode, 'a form-encoded send must succeed').toBe(200)
+
+    // ...while JSON mislabelled as a form is read as a form, finds none of its
+    // fields, and fails on them, as it would against Meta. Only the control
+    // API reads any body as JSON.
+    const mislabelled = await app.inject({ method: 'POST', url: '/v19.0/PNID_DEFAULT/messages', headers: FORM, payload })
+    expect(mislabelled.statusCode).toBe(400)
+    expect(mislabelled.json().error.error_data.details).toMatch(/messaging_product/)
   })
 
   it('treats an empty body as an empty object rather than a parse error', async () => {

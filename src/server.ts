@@ -1,7 +1,9 @@
 import Fastify from 'fastify'
-import type { FastifyBodyParser, FastifyInstance } from 'fastify'
+import type { FastifyBodyParser, FastifyInstance, FastifyRequest } from 'fastify'
 
 import { registerControlRoutes } from './control/routes.js'
+import { DOWNLOAD_PATH } from './graph/media-service.js'
+import { parseMultipart, parseUrlEncoded } from './http/forms.js'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './core/engine.js'
 import type { WamockEngine } from './core/engine.js'
 import { ERROR_CODES, GraphError } from './errors/graph-error.js'
@@ -18,6 +20,9 @@ import { ERROR_CODES, GraphError } from './errors/graph-error.js'
  * code under test (spec §5.1).
  */
 const VERSION_PATTERN = /^v\d+\.\d+$/
+
+/** The largest media upload (a 100 MB document) plus room for the multipart framing. */
+const MULTIPART_BODY_LIMIT = 101 * 1024 * 1024
 
 /**
  * Pull the bearer token out of the Authorization header, or undefined when
@@ -41,6 +46,32 @@ export interface ServerOptions {
    * triggered. Bounded so a hung receiver cannot hold the request open.
    */
   settleTimeoutMs?: number
+}
+
+/**
+ * The paging part of a Graph edge's query (`limit`, `after`, `before`), plus
+ * where the call came in, so `paging.next` points back at the same server and
+ * version.
+ */
+function pagingQuery(request: FastifyRequest<{ Params: { version: string }; Querystring: Record<string, string> }>): {
+  limit?: number
+  after?: string
+  before?: string
+  baseUrl?: string
+  version: string
+} {
+  const { limit, after, before } = request.query
+  if (limit !== undefined && !(/^\d+$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 100)) {
+    throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param limit must be an integer between 1 and 100' })
+  }
+  const host = request.headers.host
+  return {
+    ...(limit !== undefined ? { limit: Number(limit) } : {}),
+    ...(after !== undefined ? { after } : {}),
+    ...(before !== undefined ? { before } : {}),
+    ...(host !== undefined ? { baseUrl: `${request.protocol}://${host}` } : {}),
+    version: request.params.version,
+  }
 }
 
 export function createServer(engine: WamockEngine, options: ServerOptions = {}): FastifyInstance {
@@ -116,6 +147,33 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   app.addContentTypeParser('*', { parseAs: 'string' }, parseControlBody)
   app.addContentTypeParser('text/plain', { parseAs: 'string' }, parseControlBody)
 
+  // Graph takes two more bodies than JSON. A form is how the Messages API
+  // accepts a send without JSON; multipart is the only way to upload media.
+  // The control API keeps reading everything as JSON.
+  app.addContentTypeParser(
+    'application/x-www-form-urlencoded',
+    { parseAs: 'string' },
+    (request, body: string, done) => {
+      if (request.url.startsWith('/__mock/')) return parseControlBody(request, body, done)
+      done(null, parseUrlEncoded(body))
+    },
+  )
+  app.addContentTypeParser(
+    'multipart/form-data',
+    // Documents go up to 100 MB; leave room for the multipart framing.
+    { parseAs: 'buffer', bodyLimit: MULTIPART_BODY_LIMIT },
+    (request, body: Buffer, done) => {
+      const fields = request.url.startsWith('/__mock/')
+        ? undefined
+        : parseMultipart(body, String(request.headers['content-type'] ?? ''))
+      if (fields === undefined) {
+        done(new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Malformed multipart/form-data body' }), undefined)
+        return
+      }
+      done(null, fields)
+    },
+  )
+
   /**
    * Hand over the webhooks this control call triggered before answering it.
    *
@@ -135,8 +193,15 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    * +50ms and +500ms, so no `advance(0)` would deliver them wherever it ran.
    */
   const settleTimeoutMs = options.settleTimeoutMs ?? DEFAULT_SETTLE_TIMEOUT_MS
+  // Where each control request's own deliveries start: the flush after it
+  // waits for those (and what they set off), never for ones already running
+  // when it arrived — a receiver calling back mid-delivery included.
+  const startedAt = new WeakMap<object, number>()
+  app.addHook('onRequest', async (request) => {
+    if (request.url.startsWith('/__mock/')) startedAt.set(request, engine.deliverer.nextAttempt())
+  })
   app.addHook('onSend', async (request, _reply, payload) => {
-    if (request.url.startsWith('/__mock/')) await engine.flush(settleTimeoutMs)
+    if (request.url.startsWith('/__mock/')) await engine.flush(settleTimeoutMs, startedAt.get(request))
     return payload
   })
 
@@ -156,7 +221,7 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    */
   app.addHook('preHandler', async (request) => {
     if (request.method === 'GET' && request.url.startsWith('/__mock/')) {
-      await engine.flush(settleTimeoutMs)
+      await engine.flush(settleTimeoutMs, startedAt.get(request))
     }
   })
 
@@ -197,7 +262,10 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     '/:version/debug_token',
     async (request, reply) => {
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
-      const { input_token: inputToken, access_token: accessToken } = request.query
+      // The app token goes in the query or, like any Graph token, in the
+      // Authorization header.
+      const inputToken = request.query['input_token']
+      const accessToken = request.query['access_token'] ?? bearerToken(request.headers)
       if (!inputToken || !accessToken) {
         throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
           details: 'input_token and access_token are both required',
@@ -211,7 +279,17 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     '/:version/:wabaId/subscribed_apps',
     async (request, reply) => {
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
-      return reply.send(engine.subscribeApp(request.params.wabaId, bearerToken(request.headers)))
+      return reply.send(
+        await engine.subscribeAppVerified(request.params.wabaId, (request.body ?? {}) as Record<string, unknown>),
+      )
+    },
+  )
+
+  app.delete<{ Params: { version: string; wabaId: string } }>(
+    '/:version/:wabaId/subscribed_apps',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(engine.unsubscribeApp(request.params.wabaId))
     },
   )
 
@@ -224,6 +302,55 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   )
 
   // --- media (spec §5.5) ---------------------------------------------------
+
+  /**
+   * Every Graph call carries a token, and a token wamock issued is checked on
+   * every route: expired or revoked fails with 190 wherever it is used. Only
+   * the send route and app subscription used to check it, so an integration's
+   * expired-token handling was exercised on sends and nowhere else.
+   *
+   * The two token endpoints themselves authenticate differently (client
+   * secret, app token) and are left alone.
+   *
+   * The object and edge come from the matched route and its decoded params,
+   * never from the raw URL: `%50NID_…` routes to `PNID_…`, so a check on the
+   * raw text would authorize one object and serve another.
+   */
+  app.addHook('preHandler', async (request) => {
+    const params = (request.params ?? {}) as Record<string, string | undefined>
+    const route = request.routeOptions.url ?? ''
+    if (params['version'] === undefined || !VERSION_PATTERN.test(params['version'])) return
+    if (route === '/:version/oauth/access_token' || route === '/:version/debug_token') return
+    const objectId = params['phoneNumberId'] ?? params['wabaId'] ?? params['objectId']
+    const edge = route.split('/')[3]
+    engine.assertAccessToken(bearerToken(request.headers), {
+      ...(objectId !== undefined ? { objectId } : {}),
+      ...(edge !== undefined ? { edge } : {}),
+      method: request.method === 'DELETE' ? 'delete' : request.method === 'POST' ? 'post' : 'get',
+    })
+  })
+
+  app.get<{ Params: { version: string; wabaId: string }; Querystring: Record<string, string> }>(
+    '/:version/:wabaId/phone_numbers',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const fields = (request.query['fields'] ?? '')
+        .split(',')
+        .map((field) => field.trim())
+        .filter(Boolean)
+      // Meta documents the sort both as `['last_onboarded_time_ascending']`
+      // and as `last_onboarded_time.asc`; either means oldest first.
+      const sort = request.query['sort'] ?? ''
+      return reply.send(
+        engine.listPhoneNumbers(request.params.wabaId, {
+          fields,
+          ascending: sort.includes('last_onboarded_time_ascending') || sort.includes('last_onboarded_time.asc'),
+          ...(request.query['sort'] !== undefined ? { sort } : {}),
+          ...pagingQuery(request),
+        }),
+      )
+    },
+  )
 
   // Coexistence: request the Business app's contacts or chat history, once
   // each, within 24 hours of onboarding.
@@ -250,7 +377,10 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    * media metadata and phone-number fields, so it dispatches on which object
    * the id names. Registered last, after every more specific route.
    */
-  app.get<{ Params: { version: string; objectId: string }; Querystring: { fields?: string } }>(
+  app.get<{
+    Params: { version: string; objectId: string }
+    Querystring: { fields?: string; phone_number_id?: string }
+  }>(
     '/:version/:objectId',
     async (request, reply) => {
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
@@ -264,9 +394,60 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
         return reply.send(engine.getPhoneNumberFields(objectId, fields))
       }
 
-      return reply.send(engine.getMedia(objectId))
+      // The download URL points back at this server, so a client that only
+      // knows a base URL can fetch the bytes too.
+      return reply.send(
+        engine.getMedia(objectId, {
+          ...(request.query.phone_number_id !== undefined ? { phoneNumberId: request.query.phone_number_id } : {}),
+          baseUrl: `${request.protocol}://${request.headers.host ?? 'localhost'}`,
+        }),
+      )
     },
   )
+
+  /**
+   * `POST /{version}/{phone_number_id}`: of the settings Meta takes here,
+   * wamock emulates `webhook_configuration`, the number's own callback URL.
+   */
+  app.post<{ Params: { version: string; objectId: string } }>('/:version/:objectId', async (request, reply) => {
+    if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+    return reply.send(
+      await engine.configurePhoneNumber(request.params.objectId, (request.body ?? {}) as Record<string, unknown>),
+    )
+  })
+
+  /** `DELETE /{version}/{media_id}`. */
+  app.delete<{ Params: { version: string; objectId: string }; Querystring: { phone_number_id?: string } }>(
+    '/:version/:objectId',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      return reply.send(
+        engine.deleteMedia(request.params.objectId, {
+          ...(request.query.phone_number_id !== undefined ? { phoneNumberId: request.query.phone_number_id } : {}),
+        }),
+      )
+    },
+  )
+
+  /**
+   * A media download URL. It needs a bearer token, like Meta's, and answers
+   * 404 once the URL is more than 5 minutes old: the cure is to look the media
+   * id up again for a fresh URL.
+   */
+  app.get<{ Querystring: { mid?: string; ext?: string; hash?: string } }>(DOWNLOAD_PATH, async (request, reply) => {
+    const token = bearerToken(request.headers)
+    if (token === undefined) {
+      const error = new GraphError(ERROR_CODES.TOKEN_INVALID)
+      return reply.status(401).send(error.toBody(engine.nextFbtraceId()))
+    }
+    // The bytes are the media's, so the token needs what reading the media
+    // needs: the messaging permission and, for a business token, ownership.
+    if (request.query.mid !== undefined) engine.assertAccessToken(token, { objectId: request.query.mid, method: 'get' })
+    else engine.assertAccessToken(token)
+    const media = engine.downloadMedia(request.query)
+    if (!media) return reply.status(404).send()
+    return reply.header('content-type', media.mimeType).send(media.bytes)
+  })
 
   // --- message templates (spec §5.3) --------------------------------------
 
@@ -279,11 +460,14 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
     },
   )
 
-  app.get<{ Params: { version: string; wabaId: string } }>(
+  app.get<{ Params: { version: string; wabaId: string }; Querystring: Record<string, string> }>(
     '/:version/:wabaId/message_templates',
     async (request, reply) => {
       if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
-      return reply.send(engine.listTemplates(request.params.wabaId))
+      const { name } = request.query
+      return reply.send(
+        engine.listTemplates(request.params.wabaId, { ...(name !== undefined ? { name } : {}), ...pagingQuery(request) }),
+      )
     },
   )
 

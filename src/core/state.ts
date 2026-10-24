@@ -39,6 +39,9 @@ export interface SeedOptions {
  */
 const DEFAULT_MAX_RECORDED = 10_000
 
+/** The seeded app's name, beside the seeded number's `verified_name`. */
+const DEFAULT_APP_NAME = 'wamock Test App'
+
 const DEFAULTS = {
   businessId: 'BUSINESS_DEFAULT',
   appId: 'APP_DEFAULT',
@@ -111,11 +114,32 @@ export class MockState {
     })
   }
 
-  /** Subscribe an app to a WABA's webhooks (`POST /{waba_id}/subscribed_apps`). */
-  subscribeApp(wabaId: string, appId: string): void {
+  /**
+   * Subscribe an app to a WABA's webhooks (`POST /{waba_id}/subscribed_apps`).
+   * Subscribing again replaces the callback override, or clears it.
+   */
+  subscribeApp(wabaId: string, appId: string, callbackOverride?: { url: string; verifyToken: string }): void {
     const waba = this.#wabas.get(wabaId)
     if (!waba) throw new Error(`Cannot subscribe to unknown WABA ${wabaId}`)
     waba.subscribedApps.add(appId)
+    if (callbackOverride) waba.callbackOverride = callbackOverride
+    else delete waba.callbackOverride
+  }
+
+  /** A number's own callback override, or none to remove it. */
+  setPhoneCallbackOverride(phoneNumberId: string, callbackOverride: { url: string; verifyToken: string } | undefined): void {
+    const phoneNumber = this.#phoneNumbers.get(phoneNumberId)
+    if (!phoneNumber) throw new Error(`Cannot configure unknown phone number ${phoneNumberId}`)
+    if (callbackOverride) phoneNumber.callbackOverride = callbackOverride
+    else delete phoneNumber.callbackOverride
+  }
+
+  /** `DELETE /{waba_id}/subscribed_apps`: deliveries stop at once. */
+  unsubscribeApp(wabaId: string, appId: string): void {
+    const waba = this.#wabas.get(wabaId)
+    if (!waba) throw new Error(`Cannot unsubscribe from unknown WABA ${wabaId}`)
+    waba.subscribedApps.delete(appId)
+    delete waba.callbackOverride
   }
 
   /**
@@ -311,7 +335,7 @@ export class MockState {
 
   #applySeed(): void {
     this.registerBusiness(this.defaultBusinessId)
-    this.registerApp({ appId: this.defaultAppId, appSecret: this.#seed.appSecret })
+    this.registerApp({ appId: this.defaultAppId, appSecret: this.#seed.appSecret, name: DEFAULT_APP_NAME })
     // The seeded WABA arrives already subscribed: the single-tenant case must
     // not have to know that subscriptions exist. Unsubscribed WABAs are opt-in
     // via the embedded-signup control endpoint.

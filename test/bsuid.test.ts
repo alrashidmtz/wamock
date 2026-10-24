@@ -132,6 +132,20 @@ describe('statuses identify the recipient by BSUID too', () => {
     ])
   })
 
+  it('keeps the phone number on a read that comes after the 30 days, since the send named it', async () => {
+    const { e, statuses, bsuid, flush } = harness()
+    e.simulateInbound({ from: CUSTOMER, contactName: 'Pablo', username: 'pablo', message: { type: 'text', text: { body: 'hi' } } })
+    const id = e.sendMessage(e.state.defaultPhoneNumberId, text({ to: CUSTOMER })).messages[0]!.id
+    await flush()
+    e.clock.advance(31 * DAY)
+    e.forceStatus(id, 'read')
+    await flush()
+
+    const read = statuses().at(-1)!
+    expect(read['statuses'][0]).toMatchObject({ status: 'read', recipient_id: CUSTOMER, recipient_user_id: bsuid() })
+    expect(read['contacts']).toEqual([{ profile: { name: 'Pablo', username: 'pablo' }, wa_id: CUSTOMER, user_id: bsuid() }])
+  })
+
   it('leaves contacts and the BSUID off a failed status for a phone-number send', async () => {
     const { e, statuses, flush } = harness()
     e.simulateInbound({ from: CUSTOMER, message: { type: 'text', text: { body: 'hi' } } })

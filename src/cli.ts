@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs'
 import { DEFAULT_HOST, HELP_TEXT, NON_LOOPBACK_HOSTS, parseArgs } from './cli-args.js'
 import { WamockEngine } from './core/engine.js'
 import { createServer } from './server.js'
-import { verifyWebhookUrl } from './webhooks/handshake.js'
 import { httpTransport } from './webhooks/transport.js'
 
 /**
@@ -80,9 +79,12 @@ async function main(argv: string[]): Promise<number> {
   })
   engine.clock.start()
 
-  if (options.webhookUrl) {
-    engine.deliverer.setTransport(httpTransport(options.webhookUrl))
-  }
+  // The same handshake Meta runs before it delivers anything: until the URL
+  // passes it, webhooks wait (and are retried) instead of going out.
+  const transport = options.webhookUrl
+    ? httpTransport(options.webhookUrl, { verifyToken: options.verifyToken })
+    : undefined
+  if (transport) engine.deliverer.setTransport(transport)
 
   const app = createServer(engine, { logger: !options.quiet })
   await app.listen({ port: options.port, host: options.host })
@@ -124,16 +126,17 @@ async function main(argv: string[]): Promise<number> {
     )
   }
 
-  if (options.webhookUrl) {
+  if (transport) {
     // Run Meta's own subscription handshake. A receiver that answers "ok"
     // instead of echoing the challenge looks healthy and silently receives
     // nothing — better to say so now than to debug it in an hour.
-    const result = await verifyWebhookUrl(options.webhookUrl, options.verifyToken)
+    const result = await transport.verify()
     process.stdout.write(
       result.ok
         ? `  ✓ webhook url verified (hub.challenge echoed)\n\n`
         : `  ! webhook verification failed: ${result.reason}\n` +
-            `    Webhooks will still be delivered, but Meta would refuse this URL.\n\n`,
+            `    Meta delivers nothing to a URL that fails this, and neither does wamock:\n` +
+            `    webhooks wait and are retried, and the handshake runs again first.\n\n`,
     )
   }
 

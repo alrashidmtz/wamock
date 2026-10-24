@@ -40,7 +40,9 @@
  */
 
 /** Hosts that belong to Meta's Graph API and should be redirected. */
-const GRAPH_HOSTS = new Set(['graph.facebook.com', 'graph.instagram.com'])
+// lookaside.fbsbx.com is where Meta serves media downloads: a media URL taken
+// from `GET /{media_id}` must reach the mock too, or the download escapes.
+const GRAPH_HOSTS = new Set(['graph.facebook.com', 'graph.instagram.com', 'lookaside.fbsbx.com'])
 
 /**
  * What `fetch` accepts. Declared here rather than pulled from the DOM lib:

@@ -1,9 +1,12 @@
 import type { MockContext } from '../core/context.js'
+import { isRecord } from '../core/values.js'
 import type { PricingCategory } from '../core/pricing.js'
 import { requireWaba } from '../core/guards.js'
 import {
   PARAMETER_FORMATS,
+  SUPPORTED_LANGUAGES,
   TEMPLATE_CATEGORIES,
+  TEMPLATE_NAME_MAX,
   TEMPLATE_NAME_PATTERN,
   TEMPLATE_STATUSES,
   templateKey,
@@ -18,6 +21,8 @@ import type {
 } from '../core/templates.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import { buildTemplateCategoryPayload, buildTemplateStatusPayload } from '../webhooks/tech-payloads.js'
+import { pageOf } from './paging.js'
+import type { PageOptions } from './paging.js'
 
 /**
  * Message templates and their state machine (spec §5.3, §6.4).
@@ -27,6 +32,17 @@ import { buildTemplateCategoryPayload, buildTemplateStatusPayload } from '../web
  * lookup that falls back to another language — that leniency is exactly what
  * hides the trap until production.
  */
+
+/** Query of `GET /{waba_id}/message_templates`. */
+export interface TemplateListOptions extends PageOptions {
+  name?: string
+  /** Where `paging.next` and `previous` point: the mock's address over HTTP. */
+  baseUrl?: string
+  version?: string
+}
+
+/** Templates per page when the call sets no `limit`. */
+const TEMPLATE_PAGE_SIZE = 25
 
 export interface TemplateCreateResponse {
   id: string
@@ -110,13 +126,26 @@ export class TemplateService {
         details: 'Param name must contain only lowercase letters, digits and underscores',
       })
     }
+    if (name.length > TEMPLATE_NAME_MAX) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Param name exceeds the ${TEMPLATE_NAME_MAX} character limit (got ${name.length})`,
+      })
+    }
 
     const language = body['language']
     if (typeof language !== 'string' || language === '') {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param language is required' })
     }
+    // Case-sensitive, like Meta's list: `es_mx` is the typo a lenient mock lets through.
+    if (!SUPPORTED_LANGUAGES.has(language)) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: `Param language (${language}) is not a supported template language code`,
+      })
+    }
 
-    const category = body['category']
+    // Meta's own examples send the category in lowercase; it is stored, and
+    // listed, in uppercase.
+    const category = typeof body['category'] === 'string' ? body['category'].toUpperCase() : body['category']
     if (!isTemplateCategory(category)) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
         details: `Param category must be one of {${TEMPLATE_CATEGORIES.join(', ')}}`,
@@ -132,6 +161,8 @@ export class TemplateService {
         details: 'Param parameter_format must be one of {named, positional}',
       })
     }
+
+    assertCopyCodeExamples(body['components'])
 
     // Meta answers a duplicate with an ERROR body whose text says "already
     // exists" — and every real integration treats that as success. Emitting the
@@ -160,9 +191,35 @@ export class TemplateService {
   }
 
   /** `GET /{waba_id}/message_templates`. */
-  list(wabaId: string): { data: TemplateView[] } {
-    requireWaba(this.#context, wabaId)
-    return { data: this.#context.state.templatesForWaba(wabaId).map(toTemplateView) }
+  /**
+   * `GET /{waba_id}/message_templates`, paged like every Graph edge. Without
+   * `limit`, 25 a page: integrators report it as Meta's default, and an
+   * integration that never follows `paging.next` loses templates past it.
+   * `name` keeps only that template's languages.
+   */
+  list(wabaId: string, options: TemplateListOptions = {}): { data: TemplateView[]; paging?: Record<string, unknown> } {
+    requireWaba(this.#context, wabaId, 'get')
+    const templates = this.#context.state
+      .templatesForWaba(wabaId)
+      .filter((template) => options.name === undefined || template.name === options.name)
+    const byId = new Map(templates.map((template) => [template.id, template]))
+    const link = (param: 'after' | 'before', cursor: string) => {
+      const url = new URL(`${options.baseUrl ?? 'https://graph.facebook.com'}/${options.version ?? 'v26.0'}/${wabaId}/message_templates`)
+      if (options.name !== undefined) url.searchParams.set('name', options.name)
+      if (options.limit !== undefined) url.searchParams.set('limit', String(options.limit))
+      url.searchParams.set(param, cursor)
+      return url.toString()
+    }
+    const page = pageOf([...byId.keys()], { ...options, defaultLimit: TEMPLATE_PAGE_SIZE }, link)
+    if (!page) {
+      // 131059 from v24.0, per Meta's changelog. Earlier versions are not
+      // documented; wamock answers them with Graph's generic invalid parameter.
+      const major = Number(/^v(\d+)/.exec(options.version ?? 'v26.0')?.[1])
+      if (major >= 24) throw new GraphError(ERROR_CODES.INVALID_PAGINATION_CURSOR)
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param after or before is not a valid cursor' })
+    }
+    const data = page.ids.map((id) => toTemplateView(byId.get(id)!))
+    return page.paging ? { data, paging: page.paging } : { data }
   }
 
   /** `DELETE /{waba_id}/message_templates?name=…` — removes every language. */
@@ -394,6 +451,125 @@ export class TemplateService {
       })
     }
 
+    assertParameters(template, spec['components'])
+    assertCouponCodes(spec['components'])
     return toPricingCategory(template.category)
+  }
+}
+
+/**
+ * A copy code button copies at most 20 characters, both its example at
+ * creation and the `coupon_code` sent ("Maximum 20 characters", Meta's coupon
+ * template page; raised from 15 in December 2025).
+ */
+const COUPON_CODE_MAX = 20
+
+
+function assertCopyCodeExamples(components: unknown): void {
+  if (!Array.isArray(components)) return
+  for (const component of components) {
+    if (!isRecord(component) || !Array.isArray(component['buttons'])) continue
+    for (const button of component['buttons'] as unknown[]) {
+      if (!isRecord(button) || button['type'] !== 'COPY_CODE') continue
+      const example = button['example']
+      if (typeof example !== 'string' || example === '' || example.length > COUPON_CODE_MAX) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: `Param COPY_CODE example must be a code of 1 to ${COUPON_CODE_MAX} characters`,
+        })
+      }
+    }
+  }
+}
+
+function assertCouponCodes(components: unknown): void {
+  if (!Array.isArray(components)) return
+  for (const component of components) {
+    if (!isRecord(component) || component['sub_type'] !== 'copy_code' || !Array.isArray(component['parameters'])) continue
+    for (const parameter of component['parameters'] as unknown[]) {
+      if (!isRecord(parameter) || parameter['type'] !== 'coupon_code') continue
+      const code = parameter['coupon_code']
+      if (typeof code !== 'string' || code === '' || code.length > COUPON_CODE_MAX) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: `Param coupon_code must be a code of 1 to ${COUPON_CODE_MAX} characters`,
+        })
+      }
+    }
+  }
+}
+
+/**
+ * A text-component parameter must carry a value in its type's form: `text`
+ * as a string, `currency` and `date_time` as objects. Anything else — an empty
+ * object, a number for text, `null` — is 132012, rather than being counted as
+ * a parameter and sent.
+ */
+function assertParameterFormat(templateName: string, kind: string, parameter: unknown): void {
+  const value = (field: string) => (parameter as Record<string, unknown>)[field]
+  const ok =
+    typeof parameter === 'object' &&
+    parameter !== null &&
+    ((value('type') === 'text' && typeof value('text') === 'string') ||
+      (value('type') === 'currency' && typeof value('currency') === 'object' && value('currency') !== null) ||
+      (value('type') === 'date_time' && typeof value('date_time') === 'object' && value('date_time') !== null))
+  if (!ok) {
+    throw new GraphError(ERROR_CODES.TEMPLATE_PARAMETER_FORMAT, {
+      details: `template name (${templateName}): a ${kind} parameter needs a type and its value (text, currency or date_time)`,
+    })
+  }
+}
+
+/**
+ * The distinct `{{1}}` / `{{first_name}}` placeholders in a template string,
+ * written as Meta documents them: no spaces inside the brackets. `{{ 1 }}`
+ * appears nowhere in Meta's docs, so wamock reads it as text rather than let
+ * a test pass on a syntax production may not take.
+ */
+const placeholdersOf = (text: unknown): Set<string> =>
+  new Set(typeof text === 'string' ? [...text.matchAll(/\{\{([a-z0-9_]+)\}\}/g)].map((m) => m[1]!) : [])
+
+/**
+ * A send must supply exactly the parameters the template defines, per
+ * component: as many as there are distinct positional placeholders, or the
+ * same set of names for a named template. Anything else is 132000 at send
+ * time, which a mock that never looked at `components` let through until the
+ * first real send.
+ *
+ * Checked for the text header and the body, the components that carry text
+ * placeholders. Media headers and buttons are not checked.
+ */
+function assertParameters(template: Template, sent: unknown): void {
+  // A template seeded without components (`mock.approveTemplate` with none)
+  // has no known text to check against; Meta never holds one like that.
+  if (template.components.length === 0) return
+  const sentComponents = Array.isArray(sent) ? (sent as Array<Record<string, unknown>>) : []
+  for (const kind of ['header', 'body'] as const) {
+    const defined = template.components.find(
+      (c): c is Record<string, unknown> =>
+        typeof c === 'object' && c !== null && String((c as Record<string, unknown>)['type']).toLowerCase() === kind,
+    )
+    // A media header (IMAGE, VIDEO, DOCUMENT…) takes its media as a parameter
+    // and has no text placeholders to count; only a TEXT header is checked.
+    if (kind === 'header' && defined && defined['format'] !== undefined && String(defined['format']).toUpperCase() !== 'TEXT') {
+      continue
+    }
+    const expected = defined ? placeholdersOf(defined['text']) : new Set<string>()
+    const supplied = sentComponents.find((c) => String(c['type']).toLowerCase() === kind)
+    const parameters = Array.isArray(supplied?.['parameters']) ? (supplied['parameters'] as Array<Record<string, unknown>>) : []
+
+    // Named: the exact set of names, each once. Comparing counts and checking
+    // membership alone let a repeated name hide a missing one.
+    for (const parameter of parameters) assertParameterFormat(template.name, kind, parameter)
+    const names = parameters.map((p) => p['parameter_name'])
+    const matches =
+      template.parameterFormat === 'NAMED'
+        ? parameters.length === expected.size &&
+          new Set(names).size === names.length &&
+          names.every((name) => typeof name === 'string' && expected.has(name))
+        : parameters.length === expected.size
+    if (!matches) {
+      throw new GraphError(ERROR_CODES.TEMPLATE_PARAMETER_MISMATCH, {
+        details: `template name (${template.name}) expects ${expected.size} ${kind} parameter(s) and got ${parameters.length}`,
+      })
+    }
   }
 }

@@ -140,6 +140,24 @@ describe('TokenStore — debug payload shape', () => {
   })
 })
 
+// How the digest is cut, and whether the counter counts up or down, is not
+// contract: tokens only need to be distinct, deterministic and header-safe.
+describe('TokenStore — token and user ids', () => {
+  it('issues tokens a client can send as a bearer header as they are', () => {
+    const store = new TokenStore()
+    for (const kind of ['short', 'long', 'permanent'] as const) {
+      expect(store.issue({ appId: 'APP_1', kind }, EPOCH)).toMatch(/^[A-Za-z0-9_]+$/)
+    }
+  })
+
+  it('gives each token its own numeric user_id, like a Graph id', () => {
+    const store = new TokenStore()
+    const ids = [1, 2, 3].map(() => store.debug(store.issue({ appId: 'APP_1', kind: 'short' }, EPOCH), EPOCH).user_id)
+    for (const id of ids) expect(id).toMatch(/^[1-9]\d*$/)
+    expect(new Set(ids).size).toBe(3)
+  })
+})
+
 describe('TokenStore — reset', () => {
   it('clear() forgets every token', () => {
     const store = new TokenStore()

@@ -1,4 +1,4 @@
-import { toDisplayPhoneNumber } from '../core/phone.js'
+import { toWebhookDisplayNumber } from '../core/phone.js'
 import { defaultDetails } from '../errors/graph-error.js'
 
 /**
@@ -9,7 +9,8 @@ import { defaultDetails } from '../errors/graph-error.js'
  *
  * 1. **Delivery receipts arrive with no `messages` key at all.** Parsers that
  *    do `value.messages.forEach(...)` crash on every status callback.
- * 2. **Customer numbers carry no `+`, business numbers do.** See core/phone.ts.
+ * 2. **Every number in a webhook is digits only**, the business's own
+ *    included, while the Graph API formats the business number. See core/phone.ts.
  */
 
 export interface WebhookMetadata {
@@ -37,6 +38,8 @@ export interface StatusBody {
   /** Absent for a BSUID send whose recipient's phone number cannot be shared. */
   recipient_id?: string
   recipient_user_id?: string
+  /** Echoed from the send, on every status, when it carried one. */
+  biz_opaque_callback_data?: string
   conversation?: Record<string, unknown>
   pricing?: Record<string, unknown>
   errors?: StatusError[]
@@ -124,7 +127,7 @@ export interface WebhookPayload<C extends WebhookChange = WebhookChange> {
 interface Context {
   wabaId: string
   phoneNumberId: string
-  /** Digits only; rendered with `+`. */
+  /** Digits only, as every webhook carries it. */
   displayPhoneNumber: string
 }
 
@@ -137,7 +140,7 @@ const envelope = (wabaId: string, value: ChangeValue): WebhookPayload<MessagesCh
 })
 
 const metadata = (ctx: Context): WebhookMetadata => ({
-  display_phone_number: toDisplayPhoneNumber(ctx.displayPhoneNumber),
+  display_phone_number: toWebhookDisplayNumber(ctx.displayPhoneNumber),
   phone_number_id: ctx.phoneNumberId,
 })
 
@@ -185,9 +188,18 @@ export function buildInboundPayload(options: InboundOptions): WebhookPayload<Mes
   })
 }
 
+/**
+ * The statuses Meta's status webhook carries. `played` is the first play of a
+ * voice message, sent since March 17, 2026.
+ */
+export const MESSAGE_STATUSES = ['sent', 'delivered', 'read', 'played', 'failed'] as const
+export type MessageStatus = (typeof MESSAGE_STATUSES)[number]
+
+const STATUSES_WITH_CONTACTS: ReadonlySet<MessageStatus> = new Set(['sent', 'delivered', 'read'])
+
 export interface StatusOptions extends Context {
   messageId: string
-  status: 'sent' | 'delivered' | 'read' | 'failed'
+  status: MessageStatus
   user: UserIdentity
   /** How the business addressed the message: `to` or `recipient`. */
   sentTo: 'phone' | 'user_id'
@@ -197,6 +209,7 @@ export interface StatusOptions extends Context {
   /** Only for a message inside a free entry point window, since v24.0. */
   conversation?: Record<string, unknown>
   pricing?: Record<string, unknown>
+  bizOpaqueCallbackData?: string
 }
 
 /**
@@ -206,7 +219,8 @@ export interface StatusOptions extends Context {
  *   sent to a phone number.
  * - `recipient_id` when the message went to a phone number, or when the
  *   recipient's phone number may be shared.
- * - A `contacts` array on `sent`, `delivered` and `read`, never on `failed`.
+ * - A `contacts` array on `sent`, `delivered` and `read`, never on `failed`
+ *   or `played`.
  *   Its `wa_id` follows the same rule as `recipient_id`, and the username
  *   appears on `delivered` and `read` only.
  */
@@ -221,18 +235,24 @@ export function buildStatusPayload(options: StatusOptions): WebhookPayload<Messa
     timestamp: toMetaTimestamp(options.timestampMs),
     ...(withPhone ? { recipient_id: user.waId } : {}),
     ...(failed && sentTo === 'phone' ? {} : { recipient_user_id: user.userId }),
+    ...(options.bizOpaqueCallbackData !== undefined
+      ? { biz_opaque_callback_data: options.bizOpaqueCallbackData }
+      : {}),
     ...(options.conversation ? { conversation: options.conversation } : {}),
     ...(options.pricing ? { pricing: options.pricing } : {}),
-    ...(options.errorCode !== undefined ? { errors: [statusError(options.errorCode)] } : {}),
+    // `errors` describes a failure to send or deliver: a `failed` status only.
+    ...(failed && options.errorCode !== undefined ? { errors: [statusError(options.errorCode)] } : {}),
   }
 
   // No `messages` key. Not an empty array — absent, exactly like Meta.
   return envelope(options.wabaId, {
     messaging_product: 'whatsapp',
     metadata: metadata(options),
-    ...(failed
-      ? {}
-      : { contacts: [contactOf(user, { withUsername: options.status !== 'sent', withPhone })] }),
+    // Meta's BSUID reference: `contacts` comes "only" with sent, delivered
+    // and read, so not with failed nor with a voice message's played.
+    ...(STATUSES_WITH_CONTACTS.has(options.status)
+      ? { contacts: [contactOf(user, { withUsername: options.status !== 'sent', withPhone })] }
+      : {}),
     statuses: [status],
   })
 }
@@ -356,6 +376,8 @@ const STATUS_ERROR_TITLES: Record<number, string> = {
   // Meta's error code reference gives this sentence and no shorter title.
   131050:
     'Unable to deliver the message. This recipient has chosen to stop receiving marketing messages on WhatsApp from your business.',
+  // Meta's error code reference gives this sentence and no shorter title.
+  131053: 'Unable to upload the media used in the message.',
   130429: 'Rate limit hit',
   132015: 'Template is paused',
   131000: 'Something went wrong',
@@ -367,6 +389,8 @@ const STATUS_ERROR_TITLES: Record<number, string> = {
  */
 const STATUS_ONLY_DETAILS: Record<number, string> = {
   131049: 'In order to maintain a healthy ecosystem engagement, the message failed to be delivered.',
+  // Meta's error code reference.
+  131053: 'The media could not be uploaded for one or more reasons, such as an unsupported media type.',
 }
 
 function statusError(code: number): StatusError {
