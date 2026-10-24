@@ -311,14 +311,14 @@ describe('phone number lookup', () => {
     expect(res.json().display_phone_number).toMatch(/^\+/)
   })
 
-  it('returns quality rating and messaging tier when asked', async () => {
+  it('returns quality rating and messaging limit when asked', async () => {
     const res = await get(
-      `/v19.0/${engine.state.defaultPhoneNumberId}?fields=quality_rating,messaging_limit_tier`,
+      `/v19.0/${engine.state.defaultPhoneNumberId}?fields=quality_rating,whatsapp_business_manager_messaging_limit`,
     )
 
     expect(res.json()).toMatchObject({
       quality_rating: 'GREEN',
-      messaging_limit_tier: expect.stringMatching(/^TIER_/),
+      whatsapp_business_manager_messaging_limit: 'TIER_UNLIMITED',
     })
   })
 
@@ -407,16 +407,26 @@ describe('template_status_update webhooks', () => {
 // --- §9.5 Quality and messaging limits ------------------------------------
 
 describe('quality rating', () => {
-  it('emits phone_number_quality_update when quality degrades', async () => {
+  it('changes the rating a phone number lookup reports', async () => {
     const res = await post('/__mock/quality', {
       phone_number_id: engine.state.defaultPhoneNumberId,
       quality_rating: 'RED',
     })
 
     expect(res.statusCode).toBe(200)
-    const change = JSON.parse(inbox[0]!.body).entry[0].changes[0]
-    expect(change.field).toBe('phone_number_quality_update')
-    expect(change.value).toMatchObject({ event: 'FLAGGED', current_limit: expect.any(String) })
+    const lookup = await get(`/v26.0/${engine.state.defaultPhoneNumberId}?fields=quality_rating`)
+    expect(lookup.json().quality_rating).toBe('RED')
+  })
+
+  it('announces nothing: no current webhook carries a number’s quality rating', async () => {
+    // phone_number_quality_update now reports throughput and messaging-limit
+    // changes only. A receiver waiting on it for a quality downgrade waits
+    // forever; the rating has to be polled.
+    await post('/__mock/quality', {
+      phone_number_id: engine.state.defaultPhoneNumberId,
+      quality_rating: 'RED',
+    })
+    expect(inbox).toHaveLength(0)
   })
 
   it('rejects a rating outside Meta’s three', async () => {
@@ -429,94 +439,215 @@ describe('quality rating', () => {
 })
 
 describe('messaging limits', () => {
-  it('blocks a send past the tier’s unique-recipient cap', async () => {
-    // Tiers count UNIQUE recipients per 24h, not messages. An integration
-    // that meters messages will under-count and hit this unexpectedly.
-    await post('/__mock/tier', {
-      phone_number_id: engine.state.defaultPhoneNumberId,
-      tier: 'TIER_2',
+  /** An approved template, so sends can go out with no service window open. */
+  const approve = (wabaId: string = engine.state.defaultWabaId) => {
+    engine.createTemplate(wabaId, {
+      name: 'aviso',
+      language: 'es_MX',
+      category: 'UTILITY',
+      components: [],
+    })
+    engine.transitionTemplate(wabaId, 'aviso', 'es_MX', 'APPROVED')
+  }
+
+  const sendTemplate = (to: string, phoneNumberId = engine.state.defaultPhoneNumberId) =>
+    post(`/v26.0/${phoneNumberId}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'template',
+      template: { name: 'aviso', language: { code: 'es_MX' } },
     })
 
-    const send = async (to: string) => {
-      await post('/__mock/inbound', { from: to, text: 'hola' })
-      return post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, {
-        messaging_product: 'whatsapp',
-        to,
-        type: 'text',
-        text: { body: 'hi' },
-      })
-    }
+  const sendText = (to: string) =>
+    post(`/v26.0/${engine.state.defaultPhoneNumberId}/messages`, {
+      messaging_product: 'whatsapp',
+      to,
+      type: 'text',
+      text: { body: 'hi' },
+    })
 
-    expect((await send('5215555000001')).statusCode).toBe(200)
-    expect((await send('5215555000002')).statusCode).toBe(200)
+  it('blocks a business-initiated send past the cap on unique recipients', async () => {
+    // Limits count UNIQUE recipients reached outside a customer service
+    // window per rolling 24h, not messages.
+    approve()
+    await post('/__mock/tier', { tier: 'TIER_2' })
 
-    const third = await send('5215555000003')
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    expect((await sendTemplate('5215555000002')).statusCode).toBe(200)
+
+    const third = await sendTemplate('5215555000003')
     expect(third.statusCode).toBe(400)
     expect(third.json().error.code).toBe(131048)
+    expect(third.json().error.error_data.details).toMatch(/TIER_2/)
   })
 
   it('does not count a repeat recipient against the cap', async () => {
-    await post('/__mock/tier', {
-      phone_number_id: engine.state.defaultPhoneNumberId,
-      tier: 'TIER_2',
-    })
-    await post('/__mock/inbound', { from: CUSTOMER, text: 'hola' })
-
-    const body = {
-      messaging_product: 'whatsapp',
-      to: CUSTOMER,
-      type: 'text',
-      text: { body: 'hi' },
-    }
+    approve()
+    await post('/__mock/tier', { tier: 'TIER_1' })
     for (let i = 0; i < 5; i++) {
-      const res = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, body)
-      expect(res.statusCode).toBe(200)
+      expect((await sendTemplate(CUSTOMER)).statusCode).toBe(200)
     }
   })
 
-  it('frees the cap once the 24h window rolls over', async () => {
-    await post('/__mock/tier', {
-      phone_number_id: engine.state.defaultPhoneNumberId,
-      tier: 'TIER_1',
-    })
-    await post('/__mock/inbound', { from: '5215555000001', text: 'hola' })
-    await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, {
-      messaging_product: 'whatsapp',
-      to: '5215555000001',
-      type: 'text',
-      text: { body: 'hi' },
-    })
+  it('does not count replies inside a customer service window at all', async () => {
+    // Answering customers who wrote first is never capped. A mock that
+    // counted these would block support traffic Meta lets through.
+    await post('/__mock/tier', { tier: 'TIER_1' })
+    for (const customer of ['5215555000001', '5215555000002', '5215555000003']) {
+      await post('/__mock/inbound', { from: customer, text: 'hola' })
+      expect((await sendText(customer)).statusCode).toBe(200)
+    }
+    expect(engine.limits.used(engine.state.businessIdOf(engine.state.defaultPhoneNumberId)!, engine.clock.now())).toBe(0)
+  })
+
+  it('still lets you reply to a customer once the cap is used up', async () => {
+    // The cap stops NEW outreach. A customer who wrote first can always be
+    // answered, even when business-initiated sends have exhausted the limit.
+    approve()
+    await post('/__mock/tier', { tier: 'TIER_1' })
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    expect((await sendTemplate('5215555000002')).statusCode).toBe(400)
 
     await post('/__mock/inbound', { from: '5215555000002', text: 'hola' })
-    const blocked = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, {
-      messaging_product: 'whatsapp',
-      to: '5215555000002',
-      type: 'text',
-      text: { body: 'hi' },
-    })
-    expect(blocked.statusCode).toBe(400)
-
-    await post('/__mock/time/advance', { ms: 25 * HOUR })
-    await post('/__mock/inbound', { from: '5215555000003', text: 'hola' })
-    const afterRollover = await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, {
-      messaging_product: 'whatsapp',
-      to: '5215555000003',
-      type: 'text',
-      text: { body: 'hi' },
-    })
-    expect(afterRollover.statusCode).toBe(200)
+    expect((await sendText('5215555000002')).statusCode).toBe(200)
   })
 
-  it('reports how much of the cap is used', async () => {
-    await post('/__mock/inbound', { from: CUSTOMER, text: 'hola' })
-    await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, {
-      messaging_product: 'whatsapp',
-      to: CUSTOMER,
-      type: 'text',
-      text: { body: 'hi' },
+  it('does not count a template sent into an open window either', async () => {
+    approve()
+    await post('/__mock/tier', { tier: 'TIER_1' })
+    await post('/__mock/inbound', { from: '5215555000001', text: 'hola' })
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    expect((await sendTemplate('5215555000002')).statusCode).toBe(200)
+  })
+
+  it('frees the cap once the 24h period rolls over', async () => {
+    approve()
+    await post('/__mock/tier', { tier: 'TIER_1' })
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    expect((await sendTemplate('5215555000002')).statusCode).toBe(400)
+
+    await post('/__mock/time/advance', { ms: 25 * HOUR })
+    expect((await sendTemplate('5215555000002')).statusCode).toBe(200)
+  })
+
+  it('shares one cap across every number in the business portfolio', async () => {
+    // Set at portfolio level since 2025-10-08: one busy number can consume
+    // the whole portfolio's capacity and block its siblings.
+    const signup = engine.createSignup({ businessId: engine.state.businessIdOf(engine.state.defaultPhoneNumberId)! })
+    approve()
+    approve(signup.waba_id)
+    await post('/__mock/tier', { tier: 'TIER_1' })
+
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    const sibling = await sendTemplate('5215555000002', signup.phone_number_id)
+    expect(sibling.statusCode).toBe(400)
+    expect(sibling.json().error.code).toBe(131048)
+  })
+
+  it('puts a signup under an existing portfolio over HTTP too', async () => {
+    approve()
+    await post('/__mock/tier', { tier: 'TIER_1' })
+    const signup = (
+      await post('/__mock/embedded-signup', { business_id: engine.state.defaultBusinessId })
+    ).json()
+    approve(signup.waba_id)
+
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    expect((await sendTemplate('5215555000002', signup.phone_number_id)).statusCode).toBe(400)
+  })
+
+  it('never drops a generated tenant into a portfolio someone named on purpose', async () => {
+    // A tenant named BUSINESS_TENANT_2 by hand must not swallow the next
+    // generated tenant whose sequence happens to be 2.
+    const named = engine.createSignup({ businessId: 'BUSINESS_TENANT_2' })
+    const generated = engine.createSignup()
+
+    expect(engine.state.businessIdOf(generated.phone_number_id)).not.toBe(
+      engine.state.businessIdOf(named.phone_number_id),
+    )
+  })
+
+  it('never overwrites a WABA or number registered by hand', async () => {
+    const seq = engine.createSignup().waba_id.replace('WABA_TENANT_', '')
+    const next = Number(seq) + 1
+    engine.state.registerWaba({ wabaId: `WABA_TENANT_${next}`, appId: engine.state.defaultAppId })
+    engine.state.registerPhoneNumber({
+      phoneNumberId: `PNID_TENANT_${next}`,
+      wabaId: `WABA_TENANT_${next}`,
+      displayPhoneNumber: '15559990000',
     })
 
-    expect(engine.limits.used(engine.state.defaultPhoneNumberId, engine.clock.now())).toBe(1)
+    const generated = engine.createSignup()
+    expect(generated.waba_id).not.toBe(`WABA_TENANT_${next}`)
+    expect(generated.phone_number_id).not.toBe(`PNID_TENANT_${next}`)
+    expect(engine.state.phoneNumber(`PNID_TENANT_${next}`)?.displayPhoneNumber).toBe('15559990000')
+  })
+
+  it('keeps separate caps for separate portfolios', async () => {
+    const signup = engine.createSignup()
+    approve()
+    approve(signup.waba_id)
+    await post('/__mock/tier', { tier: 'TIER_1' })
+
+    expect((await sendTemplate('5215555000001')).statusCode).toBe(200)
+    expect((await sendTemplate('5215555000002', signup.phone_number_id)).statusCode).toBe(200)
+  })
+
+  it('reports the portfolio limit under the current field and the deprecated one', async () => {
+    await post('/__mock/tier', { tier: 'TIER_2K' })
+    const res = await get(
+      `/v26.0/${engine.state.defaultPhoneNumberId}?fields=whatsapp_business_manager_messaging_limit,messaging_limit_tier`,
+    )
+    expect(res.json()).toEqual({
+      id: engine.state.defaultPhoneNumberId,
+      whatsapp_business_manager_messaging_limit: 'TIER_2K',
+      messaging_limit_tier: 'TIER_2K',
+    })
+  })
+
+  it('announces a limit change with business_capability_update', async () => {
+    await post('/__mock/tier', { tier: 'TIER_2K' })
+
+    const payload = JSON.parse(inbox[0]!.body)
+    expect(payload.entry[0].id).toBe(engine.state.defaultWabaId)
+    expect(payload.entry[0].time).toBe(Math.floor(EPOCH / 1000))
+    expect(payload.entry[0].changes[0]).toEqual({
+      field: 'business_capability_update',
+      value: { max_daily_conversations_per_business: 2000 },
+    })
+  })
+
+  it('announces a limit change on every WABA in the portfolio, numbers or not', async () => {
+    // Account-level webhooks belong to the WABA. Routing them through "some
+    // phone number on it" silently skipped a WABA that has none yet.
+    engine.state.registerWaba({
+      wabaId: 'WABA_EMPTY',
+      appId: engine.state.defaultAppId,
+      subscribedApps: new Set([engine.state.defaultAppId]),
+    })
+    await post('/__mock/tier', { tier: 'TIER_2K' })
+
+    const announced = inbox.map((d) => JSON.parse(d.body).entry[0].id).sort()
+    expect(announced).toEqual([engine.state.defaultWabaId, 'WABA_EMPTY'].sort())
+  })
+
+  it('does not announce to a WABA in the portfolio that is unsubscribed', async () => {
+    engine.state.registerWaba({ wabaId: 'WABA_SILENT', appId: engine.state.defaultAppId })
+    await post('/__mock/tier', { tier: 'TIER_2K' })
+    expect(inbox.map((d) => JSON.parse(d.body).entry[0].id)).toEqual([engine.state.defaultWabaId])
+  })
+
+  it('reports unlimited as -1', async () => {
+    await post('/__mock/tier', { tier: 'TIER_250' })
+    inbox.length = 0
+    await post('/__mock/tier', { tier: 'TIER_UNLIMITED' })
+    expect(JSON.parse(inbox[0]!.body).entry[0].changes[0].value).toEqual({
+      max_daily_conversations_per_business: -1,
+    })
+  })
+
+  it('no longer accepts TIER_1K, which Meta replaced with TIER_2K', async () => {
+    expect((await post('/__mock/tier', { tier: 'TIER_1K' })).statusCode).toBe(400)
   })
 
   it('is unlimited by default, so the simple case is never blocked', async () => {
@@ -572,5 +703,12 @@ describe('§9.6.1 — onboarding, end to end', () => {
     })
     expect(sent.statusCode).toBe(200)
     expect(sent.json().messages[0].id).toMatch(/^wamid\./)
+  })
+})
+
+describe('signup codes are deterministic', () => {
+  it('mints the same code in two identical runs', () => {
+    const codeOf = () => new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH }).createSignup().code
+    expect(codeOf()).toBe(codeOf())
   })
 })

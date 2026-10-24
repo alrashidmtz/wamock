@@ -1,7 +1,7 @@
 import { DEFAULT_SETTLE_TIMEOUT_MS, WamockEngine } from './core/engine.js'
 import type { ScenarioConfig } from './core/scenario.js'
 import type { TemplateCategory, TemplateStatus } from './core/templates.js'
-import type { OutboundMessage } from './core/types.js'
+import type { OutboundMessage, ReadReceipt } from './core/types.js'
 import { installGraphInterceptor } from './intercept.js'
 import { createServer } from './server.js'
 import type { InboundContent } from './webhooks/payloads.js'
@@ -64,16 +64,30 @@ export interface InboundOptions {
   text?: string
   buttonReply?: { id: string; title: string }
   listReply?: { id: string; title: string; description?: string }
+  /**
+   * The user's username. It sticks to the user, and hides their phone number
+   * from webhooks unless your number was in contact with it in the last 30
+   * days. `null` removes it.
+   */
+  username?: string | null
+  /**
+   * The Click-to-WhatsApp ad the user came from, as Meta's `referral` object.
+   * Replying inside the service window opens a 7-day free entry point window.
+   */
+  referral?: Record<string, unknown>
   phoneNumberId?: string
 }
 
-export interface SendOptions {
-  to: string
+/**
+ * Address a send by phone number (`to`), by business-scoped user ID
+ * (`recipient`), or both, in which case `to` wins, as at Meta.
+ */
+export type SendOptions = {
   text?: string
   template?: { name: string; language: string; components?: unknown[] }
   interactive?: Record<string, unknown>
   phoneNumberId?: string
-}
+} & ({ to: string; recipient?: string } | { to?: undefined; recipient: string })
 
 export interface ExpectSentCriteria {
   type?: string
@@ -93,6 +107,20 @@ export interface Wamock {
 
   inbound(options: InboundOptions): Promise<{ messageId: string }>
   send(options: SendOptions): Promise<{ id: string }>
+  /**
+   * A user changes their phone number. Their BSUID changes with it, and your
+   * number receives a `system` message saying so.
+   */
+  changeUserNumber(options: { from: string; to: string; phoneNumberId?: string }): Promise<void>
+  /**
+   * A user stops or resumes marketing messages. A marketing template sent to
+   * them after a stop is accepted, then fails on its status with 131050.
+   */
+  setUserPreference(options: {
+    from: string
+    value: 'stop' | 'resume'
+    phoneNumberId?: string
+  }): Promise<void>
 
   time: {
     advance(ms: number): Promise<void>
@@ -111,7 +139,44 @@ export interface Wamock {
     to: TemplateStatus
   }): Promise<void>
 
+  /**
+   * Play Meta's automated recategorization: a `template_category_update`
+   * notice now and the change 24 virtual hours later, or at once with
+   * `notice: false`. The template stays APPROVED; only its billing changes.
+   */
+  recategorizeTemplate(options: {
+    name: string
+    language: string
+    to: TemplateCategory
+    notice?: boolean
+  }): Promise<void>
+
+  /**
+   * The WhatsApp Business app side of a coexistence number (one onboarded with
+   * `engine.createSignup({ coexistence: true })`). What happens here reaches
+   * your app only as webhooks.
+   */
+  businessApp: {
+    /** The business replies from the app: `smb_message_echoes`, no window, no bill. */
+    send(options: { phoneNumberId: string; to: string; text: string }): Promise<void>
+    /** The business adds, edits or removes a contact: `smb_app_state_sync`. */
+    contact(options: {
+      phoneNumberId: string
+      phone: string
+      full_name?: string
+      first_name?: string
+      action?: 'add' | 'remove'
+    }): Promise<void>
+    /** The business changes device: offboarded, then reconnected unless `reconnect: false`. */
+    offboard(options: { phoneNumberId: string; reconnect?: boolean }): Promise<void>
+  }
+
   messages(): OutboundMessage[]
+  /**
+   * Every successful mark-as-read call, with whether it asked for a typing
+   * indicator. Kept apart from `messages()`: reading a message sends nothing.
+   */
+  readReceipts(): ReadReceipt[]
   expectSent(criteria: ExpectSentCriteria): OutboundMessage
   scenario(config: Partial<ScenarioConfig>): void
 
@@ -179,6 +244,7 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       const result = engine.simulateInbound({
         from: inboundOptions.from,
         ...(inboundOptions.name !== undefined ? { contactName: inboundOptions.name } : {}),
+        ...(inboundOptions.username !== undefined ? { username: inboundOptions.username } : {}),
         ...(inboundOptions.phoneNumberId !== undefined
           ? { phoneNumberId: inboundOptions.phoneNumberId }
           : {}),
@@ -195,6 +261,16 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       )
       await flush()
       return { id: response.messages[0]!.id }
+    },
+
+    async changeUserNumber(options) {
+      engine.changeUserNumber(options)
+      await flush()
+    },
+
+    async setUserPreference(options) {
+      engine.setUserPreference(options)
+      await flush()
     },
 
     time: {
@@ -221,7 +297,31 @@ export async function createWamock(options: CreateWamockOptions): Promise<Wamock
       await flush()
     },
 
+    async recategorizeTemplate({ name, language, to, notice }) {
+      engine.recategorizeTemplate(engine.state.defaultWabaId, name, language, {
+        to,
+        ...(notice !== undefined ? { notice } : {}),
+      })
+      await flush()
+    },
+
+    businessApp: {
+      async send(options) {
+        engine.businessAppSend(options)
+        await flush()
+      },
+      async contact(options) {
+        engine.businessAppContact(options)
+        await flush()
+      },
+      async offboard(options) {
+        engine.businessAppOffboard(options)
+        await flush()
+      },
+    },
+
     messages: () => engine.state.outbound(),
+    readReceipts: () => engine.state.readReceipts(),
 
     expectSent(criteria) {
       const sent = engine.state.outbound()
@@ -325,6 +425,11 @@ function addressOf(app: FastifyInstance): string {
 }
 
 function toInboundContent(options: InboundOptions): InboundContent {
+  const content = messageContent(options)
+  return options.referral !== undefined ? { ...content, referral: options.referral } : content
+}
+
+function messageContent(options: InboundOptions): InboundContent {
   if (options.buttonReply) {
     return {
       type: 'interactive',
@@ -341,10 +446,14 @@ function toInboundContent(options: InboundOptions): InboundContent {
 }
 
 function toSendBody(options: SendOptions): Record<string, unknown> {
+  const address = {
+    ...(options.to !== undefined ? { to: options.to } : {}),
+    ...(options.recipient !== undefined ? { recipient: options.recipient } : {}),
+  }
   if (options.template) {
     return {
       messaging_product: 'whatsapp',
-      to: options.to,
+      ...address,
       type: 'template',
       template: {
         name: options.template.name,
@@ -356,14 +465,14 @@ function toSendBody(options: SendOptions): Record<string, unknown> {
   if (options.interactive) {
     return {
       messaging_product: 'whatsapp',
-      to: options.to,
+      ...address,
       type: 'interactive',
       interactive: options.interactive,
     }
   }
   return {
     messaging_product: 'whatsapp',
-    to: options.to,
+    ...address,
     type: 'text',
     text: { body: options.text ?? '' },
   }
@@ -405,4 +514,4 @@ export { signBody, verifySignature } from './webhooks/signature.js'
 export type { SignBodyInput, VerifySignatureInput } from './webhooks/signature.js'
 export { verifyWebhookUrl } from './webhooks/handshake.js'
 export type { WebhookDelivery, WebhookTransport } from './webhooks/transport.js'
-export type { OutboundMessage } from './core/types.js'
+export type { OutboundMessage, ReadReceipt } from './core/types.js'

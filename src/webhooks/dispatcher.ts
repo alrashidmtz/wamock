@@ -2,7 +2,7 @@ import type { ScenarioController } from '../core/scenario.js'
 import type { MockState } from '../core/state.js'
 import type { WebhookDeliverer } from './delivery.js'
 import { buildStatusPayload } from './payloads.js'
-import type { WebhookPayload } from './payloads.js'
+import type { UserIdentity, WebhookPayload } from './payloads.js'
 
 /**
  * The single place a webhook can be handed to the delivery queue.
@@ -37,10 +37,20 @@ export class WebhookDispatcher {
   dispatch(phoneNumberId: string, payload: WebhookPayload, atMs?: number): void {
     const phoneNumber = this.#state.phoneNumber(phoneNumberId)
     if (!phoneNumber) return
-    if (!this.#state.isSubscribed(phoneNumber.wabaId)) return
+    this.dispatchToWaba(phoneNumber.wabaId, payload, atMs)
+  }
 
-    const appSecret = this.#state.appSecretForPhoneNumber(phoneNumberId)
-    // No secret means nothing to sign with. Callers validate the number first,
+  /**
+   * Queue an account-level webhook (template status, messaging limits) for the
+   * app that owns `wabaId`. These belong to the WABA, not to a number: routing
+   * them through "some number on the WABA" silently skips a WABA that has none
+   * yet, which is exactly the state right after a tech-provider signup.
+   */
+  dispatchToWaba(wabaId: string, payload: WebhookPayload, atMs?: number): void {
+    if (!this.#state.isSubscribed(wabaId)) return
+
+    const appSecret = this.#state.appSecretForWaba(wabaId)
+    // No secret means nothing to sign with. Callers validate the WABA first,
     // so reaching here is a bug in the mock, not a user error.
     if (!appSecret) return
 
@@ -56,7 +66,8 @@ export class WebhookDispatcher {
     options: {
       messageId: string
       status: 'sent' | 'delivered' | 'read' | 'failed'
-      recipientId: string
+      user: UserIdentity
+      sentTo: 'phone' | 'user_id'
       timestampMs: number
       errorCode?: number
       conversation?: Record<string, unknown>
@@ -75,7 +86,8 @@ export class WebhookDispatcher {
         displayPhoneNumber: phoneNumber.displayPhoneNumber,
         messageId: options.messageId,
         status: options.status,
-        recipientId: options.recipientId,
+        user: options.user,
+        sentTo: options.sentTo,
         timestampMs: options.timestampMs,
         ...(options.errorCode !== undefined ? { errorCode: options.errorCode } : {}),
         ...(options.conversation ? { conversation: options.conversation } : {}),

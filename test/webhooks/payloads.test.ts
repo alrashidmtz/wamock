@@ -11,8 +11,7 @@ const CONTEXT = {
 describe('buildInboundPayload', () => {
   const payload = buildInboundPayload({
     ...CONTEXT,
-    from: '5215555000001',
-    contactName: 'Test Customer',
+    user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true, name: 'Test Customer' },
     messageId: 'wamid.IN1',
     timestampMs: 1_750_000_000_000,
     message: { type: 'text', text: { body: 'hola' } },
@@ -35,17 +34,6 @@ describe('buildInboundPayload', () => {
     expect(payload.entry[0]!.changes[0]!.value.metadata.display_phone_number).toBe('+15550001111')
   })
 
-  it('normalizes a + the caller passed in the customer number', () => {
-    const p = buildInboundPayload({
-      ...CONTEXT,
-      from: '+5215555000001',
-      messageId: 'wamid.IN2',
-      timestampMs: 0,
-      message: { type: 'text', text: { body: 'x' } },
-    })
-    expect(p.entry[0]!.changes[0]!.value.messages?.[0]?.from).toBe('5215555000001')
-  })
-
   it('renders the timestamp as a string of unix SECONDS, not millis', () => {
     expect(payload.entry[0]!.changes[0]!.value.messages?.[0]?.timestamp).toBe('1750000000')
   })
@@ -57,7 +45,7 @@ describe('buildInboundPayload', () => {
   it('omits contacts[].profile when no contact name is known', () => {
     const p = buildInboundPayload({
       ...CONTEXT,
-      from: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
       messageId: 'wamid.IN3',
       timestampMs: 0,
       message: { type: 'text', text: { body: 'x' } },
@@ -68,7 +56,7 @@ describe('buildInboundPayload', () => {
   it('carries an interactive button reply through untouched', () => {
     const p = buildInboundPayload({
       ...CONTEXT,
-      from: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
       messageId: 'wamid.IN4',
       timestampMs: 0,
       message: {
@@ -88,7 +76,8 @@ describe('buildStatusPayload', () => {
     ...CONTEXT,
     messageId: 'wamid.OUT1',
     status: 'delivered',
-    recipientId: '5215555000001',
+    user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+    sentTo: 'phone',
     timestampMs: 1_750_000_120_000,
   })
 
@@ -111,13 +100,52 @@ describe('buildStatusPayload', () => {
       ...CONTEXT,
       messageId: 'wamid.OUT2',
       status: 'failed',
-      recipientId: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
       timestampMs: 0,
       errorCode: 131026,
     })
     expect(failed.entry[0]!.changes[0]!.value.statuses?.[0]?.errors?.[0]).toMatchObject({
       code: 131026,
       title: 'Message undeliverable',
+    })
+  })
+
+  it('renders 131049 exactly as Meta’s own failed-status example', () => {
+    const failed = buildStatusPayload({
+      ...CONTEXT,
+      messageId: 'wamid.OUT5',
+      status: 'failed',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
+      timestampMs: 0,
+      errorCode: 131049,
+    })
+    expect(failed.entry[0]!.changes[0]!.value.statuses?.[0]?.errors).toEqual([
+      {
+        code: 131049,
+        title: 'This message was not delivered to maintain healthy ecosystem engagement.',
+        message: 'This message was not delivered to maintain healthy ecosystem engagement.',
+        error_data: {
+          details: 'In order to maintain a healthy ecosystem engagement, the message failed to be delivered.',
+        },
+        href: '/documentation/business-messaging/whatsapp/support/error-codes',
+      },
+    ])
+  })
+
+  it('falls back to the title as details when it has nothing better', () => {
+    const unknown = buildStatusPayload({
+      ...CONTEXT,
+      messageId: 'wamid.OUT6',
+      status: 'failed',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
+      timestampMs: 0,
+      errorCode: 999999,
+    })
+    expect(unknown.entry[0]!.changes[0]!.value.statuses?.[0]?.errors?.[0]?.error_data).toEqual({
+      details: 'Message failed to send',
     })
   })
 
@@ -130,7 +158,8 @@ describe('buildStatusPayload', () => {
       ...CONTEXT,
       messageId: 'wamid.OUT3',
       status: 'failed',
-      recipientId: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
       timestampMs: 0,
       errorCode: 999999,
     })
@@ -139,25 +168,21 @@ describe('buildStatusPayload', () => {
     )
   })
 
-  it('attaches conversation and pricing when supplied', () => {
-    // Spec §5.4: integrators bill per conversation, not per message. Without
-    // these objects they cannot test their own conversation counting.
+  it('attaches pricing when supplied', () => {
     const priced = buildStatusPayload({
       ...CONTEXT,
       messageId: 'wamid.OUT4',
-      status: 'sent',
-      recipientId: '5215555000001',
+      status: 'delivered',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
       timestampMs: 0,
-      conversation: { id: 'CONV_1', origin: { type: 'service' } },
-      pricing: { billable: true, pricing_model: 'CBP', category: 'service' },
+      pricing: { billable: false, pricing_model: 'PMP', type: 'free_customer_service', category: 'service' },
     })
     const status = priced.entry[0]!.changes[0]!.value.statuses?.[0]
-    expect(status?.conversation).toMatchObject({ id: 'CONV_1' })
-    expect(status?.pricing).toMatchObject({ category: 'service' })
+    expect(status?.pricing).toMatchObject({ pricing_model: 'PMP', category: 'service' })
   })
 
-  it('omits conversation and pricing when not supplied', () => {
-    expect(payload.entry[0]!.changes[0]!.value.statuses?.[0]?.conversation).toBeUndefined()
+  it('omits pricing when not supplied', () => {
     expect(payload.entry[0]!.changes[0]!.value.statuses?.[0]?.pricing).toBeUndefined()
   })
 })

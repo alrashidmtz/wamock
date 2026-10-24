@@ -9,9 +9,9 @@ import type { Wamock } from '../src/lib.js'
  *
  * A webhook with no delay of its own is scheduled at the current instant, and a
  * frozen clock never reaches an instant by itself. The library helpers have
- * always closed that gap; the HTTP door did not — so `POST /__mock/quality`
- * changed the rating, returned 200, and announced nothing. Three signals said
- * it worked and the one that mattered stayed silent.
+ * always closed that gap; the HTTP door did not — so a control call changed
+ * state, returned 200, and announced nothing. Three signals said it worked and
+ * the one that mattered stayed silent.
  *
  * These tests go through `mock.baseUrl` with plain `fetch`, exactly as the
  * field report did. Not one of them calls `advance()`, and that is the point.
@@ -63,11 +63,11 @@ const post = (path: string, body: unknown): Promise<Response> =>
 const changes = (): string[] => fields.filter((field) => field !== 'messages')
 
 describe('the control API delivers before it answers', () => {
-  it('announces a quality change', async () => {
-    const res = await post('/__mock/quality', { quality_rating: 'RED' })
+  it('announces a messaging limit change', async () => {
+    const res = await post('/__mock/tier', { tier: 'TIER_2K' })
 
     expect(res.status).toBe(200)
-    expect(changes()).toEqual(['phone_number_quality_update'])
+    expect(changes()).toEqual(['business_capability_update'])
   })
 
   it('announces a template transition', async () => {
@@ -210,12 +210,12 @@ describe('what the flush must NOT do', () => {
   })
 
   it('does not deliver a webhook twice', async () => {
-    await post('/__mock/quality', { quality_rating: 'RED' })
+    await post('/__mock/tier', { tier: 'TIER_2K' })
     // A second flush of the same already-drained queue must be a no-op — the
     // round loop stops as soon as a round delivers nothing.
     await mock.time.advance(0)
 
-    expect(changes()).toEqual(['phone_number_quality_update'])
+    expect(changes()).toEqual(['business_capability_update'])
   })
 })
 
@@ -238,14 +238,14 @@ describe('flush rounds', () => {
   const pingPong = (engine: WamockEngine): void => {
     engine.deliverer.setTransport(async () => {
       await new Promise((resolve) => setTimeout(resolve, 0))
-      engine.setQuality(engine.state.defaultPhoneNumberId, 'RED')
+      engine.setTier(engine.state.defaultPhoneNumberId, 'TIER_2K')
     })
   }
 
   it('gives up on a frozen clock, naming the runaway receiver', async () => {
     const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
     pingPong(engine)
-    engine.setQuality(engine.state.defaultPhoneNumberId, 'RED')
+    engine.setTier(engine.state.defaultPhoneNumberId, 'TIER_2K')
 
     await expect(engine.flush()).rejects.toThrow(/exceeded 100 rounds/)
   })
@@ -253,7 +253,7 @@ describe('flush rounds', () => {
   it('takes a single round on a live clock, whose tick fires the rest', async () => {
     const engine = new WamockEngine({ appSecret: 's', mode: 'live' })
     pingPong(engine)
-    engine.setQuality(engine.state.defaultPhoneNumberId, 'RED')
+    engine.setTier(engine.state.defaultPhoneNumberId, 'TIER_2K')
 
     await expect(engine.flush()).resolves.toBeUndefined()
   })
@@ -272,9 +272,9 @@ describe('flush rounds', () => {
 
     try {
       const began = Date.now()
-      const res = await fetch(`${stuck.baseUrl}/__mock/quality`, {
+      const res = await fetch(`${stuck.baseUrl}/__mock/tier`, {
         method: 'POST',
-        body: JSON.stringify({ quality_rating: 'RED' }),
+        body: JSON.stringify({ tier: 'TIER_2K' }),
       })
       const waited = Date.now() - began
 

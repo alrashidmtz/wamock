@@ -14,17 +14,23 @@
             },
             "contacts": [
               {
-                "profile": { "name": "Test Customer" },
-                "wa_id": "5215555000001"
+                "profile": {
+                  "name": "Test Customer"
+                },
+                "wa_id": "5215555000001",
+                "user_id": "MX.13491208655302741918"
               }
             ],
             "messages": [
               {
                 "from": "5215555000001",
+                "from_user_id": "MX.13491208655302741918",
                 "id": "wamid.TEST1",
                 "timestamp": "1750000000",
                 "type": "text",
-                "text": { "body": "hola" }
+                "text": {
+                  "body": "hola"
+                }
               }
             ]
           }

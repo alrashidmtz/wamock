@@ -139,3 +139,16 @@ describe('POST /__mock/templates/{name}/{language}/transition', () => {
     expect(engine.template('WABA_2', 'order_update', 'es_MX')?.status).toBe('APPROVED')
   })
 })
+
+describe('POST /__mock/templates/{name}/{language}/recategorize', () => {
+  it('sends the notice before answering, and names a bad category', async () => {
+    await post(`/v26.0/${waba}/message_templates`, body())
+    const res = await post('/__mock/templates/order_update/es_MX/recategorize', { to: 'MARKETING' })
+    expect(res.json()).toEqual({ success: true })
+
+    const bad = await post('/__mock/templates/order_update/es_MX/recategorize', { to: 'PROMO' })
+    expect(bad.json().error.error_data.details).toBe(
+      "to: Invalid enum value. Expected 'UTILITY' | 'MARKETING' | 'AUTHENTICATION', received 'PROMO'",
+    )
+  })
+})

@@ -1,6 +1,15 @@
 import type { Template } from './templates.js'
 import { templateKey } from './templates.js'
-import type { App, OutboundMessage, PhoneNumber, Waba } from './types.js'
+import type {
+  App,
+  Business,
+  InboundRecord,
+  MessagingTier,
+  OutboundMessage,
+  PhoneNumber,
+  ReadReceipt,
+  Waba,
+} from './types.js'
 
 /**
  * All mock state, in memory, tenant-aware from day one.
@@ -31,6 +40,7 @@ export interface SeedOptions {
 const DEFAULT_MAX_RECORDED = 10_000
 
 const DEFAULTS = {
+  businessId: 'BUSINESS_DEFAULT',
   appId: 'APP_DEFAULT',
   wabaId: 'WABA_DEFAULT',
   phoneNumberId: 'PNID_DEFAULT',
@@ -38,16 +48,20 @@ const DEFAULTS = {
 } as const
 
 export class MockState {
+  readonly defaultBusinessId: string = DEFAULTS.businessId
   readonly defaultAppId: string
   readonly defaultWabaId: string
   readonly defaultPhoneNumberId: string
 
   readonly #seed: SeedOptions
+  #businesses = new Map<string, Business>()
   #apps = new Map<string, App>()
   #wabas = new Map<string, Waba>()
   #phoneNumbers = new Map<string, PhoneNumber>()
   #templates = new Map<string, Template>()
   #outbound: OutboundMessage[] = []
+  #inbound = new Map<string, InboundRecord>()
+  #readReceipts: ReadReceipt[] = []
   #droppedOutbound = 0
   readonly #maxRecorded: number
   #seq = 0
@@ -63,17 +77,36 @@ export class MockState {
 
   // --- registration -------------------------------------------------------
 
+  /**
+   * Unlimited unless told otherwise: the single-tenant quickstart must never be
+   * blocked by a cap it did not ask for.
+   */
+  registerBusiness(businessId: string, messagingTier: MessagingTier = 'TIER_UNLIMITED'): void {
+    this.#businesses.set(businessId, { businessId, messagingTier })
+  }
+
   registerApp(app: App): void {
     this.#apps.set(app.appId, { ...app })
   }
 
-  registerWaba(waba: Omit<Waba, 'subscribedApps'> & { subscribedApps?: Set<string> }): void {
+  /** Without a `businessId` the WABA joins the default portfolio, and shares its limit. */
+  registerWaba(
+    waba: Omit<Waba, 'subscribedApps' | 'businessId'> & {
+      subscribedApps?: Set<string>
+      businessId?: string
+    },
+  ): void {
+    const businessId = waba.businessId ?? this.defaultBusinessId
     if (!this.#apps.has(waba.appId)) {
       throw new Error(`Cannot register WABA ${waba.wabaId}: unknown app ${waba.appId}`)
+    }
+    if (!this.#businesses.has(businessId)) {
+      throw new Error(`Cannot register WABA ${waba.wabaId}: unknown business ${businessId}`)
     }
     this.#wabas.set(waba.wabaId, {
       wabaId: waba.wabaId,
       appId: waba.appId,
+      businessId,
       subscribedApps: new Set(waba.subscribedApps ?? []),
     })
   }
@@ -123,12 +156,30 @@ export class MockState {
     return [...this.#phoneNumbers.values()]
   }
 
+  /** The business portfolio that owns this number, through its WABA. */
+  businessIdOf(phoneNumberId: string): string | undefined {
+    return this.#wabas.get(this.#phoneNumbers.get(phoneNumberId)?.wabaId ?? '')?.businessId
+  }
+
+  business(businessId: string): Business | undefined {
+    return this.#businesses.get(businessId)
+  }
+
+  businesses(): Business[] {
+    return [...this.#businesses.values()]
+  }
+
+  setMessagingTier(businessId: string, messagingTier: MessagingTier): void {
+    const existing = this.#businesses.get(businessId)
+    if (existing) this.#businesses.set(businessId, { ...existing, messagingTier })
+  }
+
   /** Every hosted WABA. Carries no secrets — safe to expose for inspection. */
   wabas(): Waba[] {
     return [...this.#wabas.values()]
   }
 
-  /** Replace a phone number's mutable attributes (quality, tier). */
+  /** Replace a phone number's mutable attributes (quality). */
   updatePhoneNumber(phoneNumberId: string, patch: Partial<PhoneNumber>): void {
     const existing = this.#phoneNumbers.get(phoneNumberId)
     if (!existing) return
@@ -142,8 +193,12 @@ export class MockState {
    * fallback secret.
    */
   appSecretForPhoneNumber(phoneNumberId: string): string | undefined {
-    const waba = this.#wabas.get(this.#phoneNumbers.get(phoneNumberId)?.wabaId ?? '')
-    return this.#apps.get(waba?.appId ?? '')?.appSecret
+    return this.appSecretForWaba(this.#phoneNumbers.get(phoneNumberId)?.wabaId ?? '')
+  }
+
+  /** The secret of the app that owns this WABA, which signs its webhooks. */
+  appSecretForWaba(wabaId: string): string | undefined {
+    return this.#apps.get(this.#wabas.get(wabaId)?.appId ?? '')?.appSecret
   }
 
   // --- templates ----------------------------------------------------------
@@ -192,6 +247,32 @@ export class MockState {
     }
   }
 
+  /**
+   * Remember a customer's message by id, for mark-as-read. Capped like the
+   * outbound log, oldest first, so a long-running server cannot grow forever.
+   */
+  recordInbound(message: InboundRecord): void {
+    this.#inbound.set(message.id, { ...message })
+    if (this.#inbound.size > this.#maxRecorded) {
+      const oldest = this.#inbound.keys().next().value
+      if (oldest !== undefined) this.#inbound.delete(oldest)
+    }
+  }
+
+  inbound(messageId: string): InboundRecord | undefined {
+    return this.#inbound.get(messageId)
+  }
+
+  recordReadReceipt(receipt: ReadReceipt): void {
+    this.#readReceipts.push({ ...receipt })
+    if (this.#readReceipts.length > this.#maxRecorded) this.#readReceipts.shift()
+  }
+
+  /** Copy, so inspection can never corrupt history. */
+  readReceipts(): ReadReceipt[] {
+    return this.#readReceipts.map((receipt) => ({ ...receipt }))
+  }
+
   /** Copy, so inspection can never corrupt history. */
   outbound(): OutboundMessage[] {
     return [...this.#outbound]
@@ -215,17 +296,21 @@ export class MockState {
    * the same id sequence.
    */
   reset(): void {
+    this.#businesses = new Map()
     this.#apps = new Map()
     this.#wabas = new Map()
     this.#phoneNumbers = new Map()
     this.#templates = new Map()
     this.#outbound = []
+    this.#inbound = new Map()
+    this.#readReceipts = []
     this.#droppedOutbound = 0
     this.#seq = 0
     this.#applySeed()
   }
 
   #applySeed(): void {
+    this.registerBusiness(this.defaultBusinessId)
     this.registerApp({ appId: this.defaultAppId, appSecret: this.#seed.appSecret })
     // The seeded WABA arrives already subscribed: the single-tenant case must
     // not have to know that subscriptions exist. Unsubscribed WABAs are opt-in
@@ -233,6 +318,7 @@ export class MockState {
     this.registerWaba({
       wabaId: this.defaultWabaId,
       appId: this.defaultAppId,
+      businessId: this.defaultBusinessId,
       subscribedApps: new Set([this.defaultAppId]),
     })
     this.registerPhoneNumber({

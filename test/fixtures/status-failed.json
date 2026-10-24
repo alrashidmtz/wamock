@@ -24,8 +24,9 @@
                     "title": "Message undeliverable",
                     "message": "Message undeliverable",
                     "error_data": {
-                      "details": "Message could not be delivered to the recipient."
-                    }
+                      "details": "Message could not be delivered to the recipient. The recipient may not have WhatsApp, or the number may be invalid."
+                    },
+                    "href": "/documentation/business-messaging/whatsapp/support/error-codes"
                   }
                 ]
               }

@@ -264,3 +264,25 @@ describe('transitionTemplate from library mode', () => {
     ).rejects.toMatchObject({ code: 132015 })
   })
 })
+
+describe('readReceipts', () => {
+  it('reports a mark-as-read made through baseUrl, apart from sent messages', async () => {
+    mock = await createWamock({ appSecret: 's', start: 1_750_000_000_000 })
+    const { messageId } = await mock.inbound({ from: CUSTOMER, text: 'hola' })
+
+    const res = await fetch(`${mock.baseUrl}/v26.0/${mock.phoneNumberId}/messages`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        messaging_product: 'whatsapp',
+        status: 'read',
+        message_id: messageId,
+        typing_indicator: { type: 'text' },
+      }),
+    })
+
+    expect(await res.json()).toEqual({ success: true })
+    expect(mock.readReceipts()).toMatchObject([{ messageId, typingIndicator: true }])
+    expect(mock.messages()).toEqual([])
+  })
+})

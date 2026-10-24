@@ -12,19 +12,26 @@
               "display_phone_number": "+15550001111",
               "phone_number_id": "PNID_1"
             },
+            "contacts": [
+              {
+                "profile": {
+                  "name": "Test Customer"
+                },
+                "wa_id": "5215555000001",
+                "user_id": "MX.13491208655302741918"
+              }
+            ],
             "statuses": [
               {
                 "id": "wamid.TESTOUT1",
                 "status": "delivered",
                 "timestamp": "1750000120",
                 "recipient_id": "5215555000001",
-                "conversation": {
-                  "id": "CONV_1",
-                  "origin": { "type": "service" }
-                },
+                "recipient_user_id": "MX.13491208655302741918",
                 "pricing": {
-                  "billable": true,
-                  "pricing_model": "CBP",
+                  "billable": false,
+                  "pricing_model": "PMP",
+                  "type": "free_customer_service",
                   "category": "service"
                 }
               }

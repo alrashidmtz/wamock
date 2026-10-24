@@ -44,7 +44,9 @@ const CATALOG: Record<string, CatalogEntry> = {
     code: 0,
     httpStatus: 401,
     retriable: false,
-    message: '(#0) Invalid OAuth access token - Cannot parse access token',
+    // Token errors carry no `(#code)` prefix, unlike every messaging error:
+    // a log parser keyed on `(#190)` never sees an expired token.
+    message: 'Invalid OAuth access token - Cannot parse access token',
     type: 'OAuthException',
     subcode: undefined,
     // OAuth errors carry no error_data — a receiver reading details blindly
@@ -55,7 +57,7 @@ const CATALOG: Record<string, CatalogEntry> = {
     code: 190,
     httpStatus: 401,
     retriable: false,
-    message: '(#190) Error validating access token: Session has expired.',
+    message: 'Error validating access token: Session has expired.',
     type: 'OAuthException',
     subcode: 463,
     details: undefined,
@@ -117,6 +119,64 @@ const CATALOG: Record<string, CatalogEntry> = {
     type: 'OAuthException',
     subcode: undefined,
     details: 'Message failed to send because the template used has been paused for quality reasons.',
+  },
+  PARAMETER_VALUE_INVALID: {
+    code: 131009,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#131009) Parameter value is not valid',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'One or more parameter values are invalid.',
+  },
+  BSUID_NOT_SUPPORTED: {
+    code: 131062,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#131062) Business-scoped User ID (BSUID) recipients are not supported for this message.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Business-scoped User ID (BSUID) recipients are not supported for this message.',
+  },
+  NOT_REGISTERED: {
+    code: 133010,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#133010) Phone number not registered on the WhatsApp Business Platform.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Register the phone number before trying again.',
+  },
+  SYNC_LIMIT_EXCEEDED: {
+    code: 2593107,
+    httpStatus: 400,
+    retriable: false,
+    message:
+      '(#2593107) You have exceeded the maximum number of times to call the synchronization api for this phone number.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details:
+      'You have exceeded the maximum number of times to call the synchronization api for this phone number.',
+  },
+  SYNC_WINDOW_CLOSED: {
+    code: 2593108,
+    httpStatus: 400,
+    retriable: false,
+    message: '(#2593108) Synchronization request can only be made within 24 hours of onboarding',
+    type: 'OAuthException',
+    subcode: undefined,
+    details: 'Synchronization request can only be made within 24 hours of onboarding',
+  },
+  TEMPLATE_DISABLED: {
+    code: 132016,
+    httpStatus: 400,
+    retriable: false,
+    message:
+      '(#132016) Template has been paused too many times due to low quality and is now permanently disabled.',
+    type: 'OAuthException',
+    subcode: undefined,
+    details:
+      'Message failed to send because the template used has been permanently disabled. Create a new template with different content.',
   },
   INTERNAL: {
     code: 131000,

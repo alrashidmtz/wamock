@@ -88,13 +88,14 @@ describe('message content cannot forge the envelope', () => {
       wabaId: 'WABA_1',
       phoneNumberId: 'PNID_1',
       displayPhoneNumber: '15550001111',
-      from: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
       messageId: 'wamid.REAL',
       timestampMs: EPOCH,
       message: {
         type: 'text',
         text: { body: 'hola' },
         from: '5219999999999',
+        from_user_id: 'MX.FORGED',
         id: 'wamid.FORGED',
         timestamp: '0',
       },
@@ -111,7 +112,7 @@ describe('message content cannot forge the envelope', () => {
       wabaId: 'WABA_1',
       phoneNumberId: 'PNID_1',
       displayPhoneNumber: '15550001111',
-      from: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
       messageId: 'wamid.X',
       timestampMs: EPOCH,
       message: { type: 'text', text: { body: 'hola' } },
@@ -119,6 +120,7 @@ describe('message content cannot forge the envelope', () => {
 
     expect(Object.keys(payload.entry[0]!.changes[0]!.value.messages![0]!)).toEqual([
       'from',
+      'from_user_id',
       'id',
       'timestamp',
       'type',
@@ -139,6 +141,8 @@ describe('retained history is bounded', () => {
         to: '5215555000001',
         type: 'text',
         payload: {},
+        recipientUserId: 'MX.1',
+        sentTo: 'phone',
         sentAt: EPOCH,
       })
     }
@@ -156,6 +160,8 @@ describe('retained history is bounded', () => {
         to: '5215555000001',
         type: 'text',
         payload: {},
+        recipientUserId: 'MX.1',
+        sentTo: 'phone',
         sentAt: EPOCH,
       })
     }
@@ -171,6 +177,8 @@ describe('retained history is bounded', () => {
       to: 't',
       type: 'text',
       payload: {},
+      recipientUserId: 'MX.1',
+      sentTo: 'phone',
       sentAt: 0,
     })
     state.recordOutbound({
@@ -179,6 +187,8 @@ describe('retained history is bounded', () => {
       to: 't',
       type: 'text',
       payload: {},
+      recipientUserId: 'MX.1',
+      sentTo: 'phone',
       sentAt: 0,
     })
     expect(state.droppedOutbound()).toBe(1)
@@ -200,7 +210,8 @@ describe('retained history is bounded', () => {
           displayPhoneNumber: '15550001111',
           messageId: `wamid.${i}`,
           status: 'sent',
-          recipientId: '5215555000001',
+          user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+          sentTo: 'phone',
           timestampMs: EPOCH,
         }),
         { appSecret: 's' },

@@ -1,52 +1,39 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  buildQualityUpdatePayload,
+  buildBusinessCapabilityPayload,
   buildTemplateStatusPayload,
 } from '../../src/webhooks/tech-payloads.js'
 
-const valueOf = (payload: ReturnType<typeof buildQualityUpdatePayload>) =>
+const valueOf = (payload: ReturnType<typeof buildTemplateStatusPayload>) =>
   payload.entry[0]!.changes[0]!.value as unknown as Record<string, unknown>
 
-const fieldOf = (payload: ReturnType<typeof buildQualityUpdatePayload>) =>
+const fieldOf = (payload: ReturnType<typeof buildTemplateStatusPayload>) =>
   payload.entry[0]!.changes[0]!.field
 
-describe('buildQualityUpdatePayload', () => {
-  it('reports a downgrade as FLAGGED', () => {
-    const payload = buildQualityUpdatePayload({
+describe('buildBusinessCapabilityPayload', () => {
+  it('reports the portfolio limit as a number, on the business_capability_update field', () => {
+    const payload = buildBusinessCapabilityPayload({
       wabaId: 'WABA_1',
-      displayPhoneNumber: '+15550001111',
-      quality: 'RED',
-      currentLimit: 'TIER_250',
+      maxDailyConversationsPerBusiness: 2000,
+      timeMs: 1_750_000_000_999,
     })
 
-    expect(fieldOf(payload)).toBe('phone_number_quality_update')
-    expect(valueOf(payload)).toMatchObject({ event: 'FLAGGED', current_limit: 'TIER_250' })
-  })
-
-  it('reports YELLOW as FLAGGED too — anything short of GREEN is a warning', () => {
-    const payload = buildQualityUpdatePayload({
-      wabaId: 'WABA_1',
-      displayPhoneNumber: '+15550001111',
-      quality: 'YELLOW',
-      currentLimit: 'TIER_1K',
+    expect(payload).toEqual({
+      object: 'whatsapp_business_account',
+      entry: [
+        {
+          id: 'WABA_1',
+          time: 1_750_000_000,
+          changes: [
+            {
+              field: 'business_capability_update',
+              value: { max_daily_conversations_per_business: 2000 },
+            },
+          ],
+        },
+      ],
     })
-
-    expect(valueOf(payload)['event']).toBe('FLAGGED')
-  })
-
-  it('reports a recovery to GREEN as UPGRADE', () => {
-    // Meta sends an EVENT, not the rating. Code that reads `quality_rating`
-    // off this webhook gets undefined — which is why the mapping is explicit.
-    const payload = buildQualityUpdatePayload({
-      wabaId: 'WABA_1',
-      displayPhoneNumber: '+15550001111',
-      quality: 'GREEN',
-      currentLimit: 'TIER_10K',
-    })
-
-    expect(valueOf(payload)['event']).toBe('UPGRADE')
-    expect(valueOf(payload)['quality_rating']).toBeUndefined()
   })
 })
 
@@ -57,8 +44,10 @@ describe('buildTemplateStatusPayload', () => {
       templateId: '1001',
       name: 'order_update',
       language: 'es_MX',
+      category: 'UTILITY',
       event: 'APPROVED',
       reason: 'NONE',
+      timeMs: 0,
     })
 
     expect(fieldOf(payload)).toBe('message_template_status_update')
@@ -77,7 +66,9 @@ describe('buildTemplateStatusPayload', () => {
       templateId: '1001',
       name: 'order_update',
       language: 'es_MX',
+      category: 'UTILITY',
       event: 'APPROVED',
+      timeMs: 0,
     })
 
     expect(valueOf(payload)['reason']).toBe('NONE')

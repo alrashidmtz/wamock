@@ -4,6 +4,153 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.4.0] — 2026-10-23
+
+**wamock now emulates the WhatsApp Cloud API as Meta runs it today.** Several
+things it reproduced as "faithful quirks" stopped being true over the last
+year. Each change below was checked against Meta's current reference pages.
+Where a page contradicts itself, the code says which form wamock picked and why.
+
+### Breaking
+
+- **Pricing is per message.** The `pricing` object now reads `pricing_model:
+  "PMP"` with a `type` field. `CBP` only ever appears on webhooks sent before
+  2025-07-01. Since 2026-10-01 each business phone number gets 1,000 free
+  service messages a month (`type: "free_customer_service"`, `billable:
+  false`). The 1,001st is `regular`. Templates are always `regular`, utility
+  ones included, even inside an open customer service window.
+- **`pricing` rides on one status per message**, `delivered` in wamock, not on
+  both `sent` and `delivered`. Meta sends it on `sent` or on one of
+  `delivered`/`read`, never on each.
+- **No `conversation` object, outside free entry point windows.** Graph v24.0
+  omits it unless the message went out inside one (see Added). Billing keyed
+  on `conversation.id` reads `undefined` for every other message.
+- **Messaging limits belong to the business portfolio**, as they have since
+  2025-10-08. Every number in a portfolio shares one cap, so one busy number
+  can block its siblings. Tenants created by `/__mock/embedded-signup` get
+  their own portfolio unless `business_id` names an existing one.
+- **Limits only count recipients reached outside a customer service window.**
+  The old counter capped replies to customers who had written first, which
+  Meta never does. Support traffic on a low tier was being refused.
+- **`TIER_1K` is gone.** Meta's ladder is 250 → `TIER_2K` → `TIER_10K` →
+  `TIER_100K` → `TIER_UNLIMITED`. `TIER_1` and `TIER_2` remain as wamock's
+  test-only tiers.
+- **`POST /__mock/quality` no longer sends a webhook.**
+  `phone_number_quality_update` now reports throughput and limit changes only,
+  and no current webhook carries a number's quality rating. The 0.3.0 fix (#4)
+  made this endpoint deliver what it announced. What it announced turned out to
+  be a webhook Meta retired. The rating still changes and is read with
+  `?fields=quality_rating`.
+- **Token errors lose their `(#code)` prefix.** `190` now reads `Error
+  validating access token: Session has expired.` and `0` reads `Invalid OAuth
+  access token - Cannot parse access token`, as Graph sends them. The fixture
+  in `test/fixtures/` already said so. The catalogue contract test pinned the
+  prefixed form and had been wrong all along.
+- **`DISABLED` templates fail with `132016`, not `132015`.** A paused template
+  comes back on its own; a disabled one never does. Reporting both as paused
+  sent integrations to wait for a template that would not return.
+- **Every `messages` webhook carries a business-scoped user ID.** Inbound
+  messages gain `contacts[].user_id` and `messages[].from_user_id`. Statuses gain
+  `recipient_user_id` and a `contacts` array on `sent`, `delivered` and `read`.
+  A customer with a username (`/__mock/inbound {username}`) discloses no phone
+  number at all unless your number was in contact with it in the last 30 days.
+  `wa_id`, `from` and `recipient_id` then go missing.
+- **Template status webhooks follow Meta's reference.** A pause reports
+  `reason: "NONE"` (it said `PAIRWISE_QUALITY_SIGNAL`, which is not a reason
+  Meta sends). Every event carries `message_template_category`, entry `time`
+  and a numeric `message_template_id`. Pauses carry `other_info`, rejections
+  `rejection_info`, disablements `disable_info`.
+- **Pausing a template follows Meta's schedule.** The first pause lifts itself
+  after 3 hours and the second after 6, each announced with `UNPAUSE`. The third
+  `PAUSED` transition disables the template instead.
+- **`GET /{waba_id}/message_templates` answers in Meta's shape** (`name`,
+  `parameter_format`, `components`, `language`, `status`, `category`, `id`).
+  It used to expose wamock's internal record, `wabaId` included.
+- **`SendOptions` is a type alias, no longer an interface**, because a send
+  takes `to`, `recipient` or both. Code that wrote `interface X extends
+  SendOptions` now fails with TS2312; write `type X = SendOptions & { … }`
+  instead.
+- **`OutboundMessage` gains `recipientUserId` and `sentTo`.** These are
+  `mock.messages()` entries, and integrations that build them by hand need both.
+
+### Added
+
+- **Sends to a BSUID.** `POST /{phone_number_id}/messages` takes `recipient`
+  instead of `to`. With both, `to` wins, as at Meta. The response then carries
+  `contacts[].user_id` and no `wa_id`. A BSUID only works from a number in its
+  own portfolio (`131009` otherwise). Authentication templates refuse BSUID
+  recipients with `131062`. The library's `send` takes `recipient` too.
+- **Customers changing numbers.** `POST /__mock/users/change-number` (and
+  `mock.changeUserNumber`) regenerates the BSUID and announces it as a `system`
+  message: `user_changed_number` when the new number can be shared, otherwise
+  `user_changed_user_id` with no phone number anywhere.
+- **Mark as read and typing indicators.** `{status: "read", message_id,
+  typing_indicator?}` on the messages route answers `{success: true}` instead
+  of `(#100)`. An id the number never received fails with `131009`, as Meta
+  documents. `mock.readReceipts()` lists them.
+- **Marketing opt-out.** `POST /__mock/users/preferences` (and
+  `mock.setUserPreference`) announces `user_preferences`. A marketing template to
+  a stopped customer is accepted, then fails on its status with `131050`, and is
+  not billed.
+- **Free entry point windows.** An inbound with a Click-to-WhatsApp `referral`
+  makes the business's reply inside the service window open a 7-day window.
+  Inside it every message is `type: "free_entry_point"`, `category:
+  "referral_conversion"`, spends no free tier, and carries a `conversation`
+  object again.
+- **Template recategorization.** `POST
+  /__mock/templates/{name}/{language}/recategorize` (and
+  `mock.recategorizeTemplate`) sends Meta's 24-hour notice, in which
+  `new_category` still holds the current category, then switches. Sends bill
+  under the new category from then on. `notice: false` switches at once.
+- `parameter_format` (`named`, `positional`) on template creation.
+- **Coexistence with the WhatsApp Business app.** `/__mock/embedded-signup
+  {coexistence: true}` onboards a Business app number with seeded contacts and
+  history, announcing `PARTNER_ADDED`. `POST /{phone_number_id}/smb_app_data`
+  syncs contacts (`smb_app_state_sync`) and history (`history`, in phases,
+  or `2593109` if not shared), once each (`2593107`) and only within 24 hours
+  (`2593108`). Replies from the app (`/__mock/app/send`,
+  `mock.businessApp.send`) arrive as `smb_message_echoes`, and open no window
+  and cost nothing. Throughput is fixed at 20 messages per second. 14 days
+  without app activity disconnect the number (`PARTNER_REMOVED`,
+  `PRIMARY_INACTIVITY`), after which sends fail with `133010`.
+  `/__mock/app/offboard` plays a device change (`ACCOUNT_OFFBOARDED`, then
+  `ACCOUNT_RECONNECTED`). `?fields=is_on_biz_app` reports it.
+- `POST /__mock/tier` announces the new limit with `business_capability_update`
+  on every WABA in the portfolio. The limit is sent as a number (`2000`, `-1`
+  for unlimited), following Meta's payload example and declared type rather
+  than the tier strings its prose lists.
+- `GET /{phone_number_id}?fields=whatsapp_business_manager_messaging_limit`.
+  The deprecated `messaging_limit_tier` still answers, with the same value.
+- Errors on `failed` statuses carry `error_data.details` and `href`, as Meta's
+  do. `131049` matches Meta's own example word for word.
+- `/__mock/state` reports business portfolios and each WABA's `businessId`.
+
+### Fixed
+
+- **zod 4, carried from 0.3.2.** The control API words its own validation
+  errors, so the move kept every message as 0.3.1 sent it.
+- **`business_capability_update` and template webhooks reach a WABA that has
+  no phone number yet.** Account-level webhooks were routed through "some
+  number on the WABA", which silently skipped one with none: the state right
+  after a tech-provider signup.
+- **Signup codes and issued tokens are deterministic.** Both came from
+  `randomBytes`, so two identical runs minted different values, against the
+  rule every other id in wamock follows. They now derive from counters that
+  `reset()` rewinds.
+- **`/__mock/embedded-signup` names what is wrong** with a rejected body, like
+  every other control endpoint, instead of answering `Invalid signup options`.
+- **A generated tenant can no longer land on a portfolio, WABA or number
+  registered by hand** with the same id, where it would have shared a
+  messaging limit or overwritten the record.
+- **The fixtures in `test/fixtures/` were never executed.** `status-failed.json`
+  described an `error_data` the builder did not emit, and nothing noticed.
+  `test/fixtures-contract.test.ts` now rebuilds every fixture from the real
+  builders and requires an exact match. Writing it is what surfaced the token
+  error prefix above.
+- The Express example sends to `v26.0` instead of `v19.0`, which Meta retired
+  on 2026-05-21. It also logs the pricing type instead of calling every status
+  a "conversation".
+
 ## [0.3.2] — 2026-10-23
 
 **zod 3 → 4, with the control API's wording unchanged.**

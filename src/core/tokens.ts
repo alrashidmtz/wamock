@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 
 /**
  * Access token lifecycle (spec §9.2).
@@ -67,10 +67,14 @@ const LIFETIME_MS: Record<TokenKind, number> = {
 
 export class TokenStore {
   #tokens = new Map<string, TokenRecord>()
+  #seq = 0
 
   issue(options: IssueOptions, nowMs: number): string {
     const lifetime = LIFETIME_MS[options.kind]
-    const token = `${options.kind.toUpperCase()}_${randomBytes(12).toString('hex')}`
+    // Derived from a counter, not drawn at random: two identical runs must
+    // issue identical tokens, and `reset()` rewinds the counter.
+    const digest = createHash('sha256').update(`token:${++this.#seq}`).digest('hex').slice(0, 24)
+    const token = `${options.kind.toUpperCase()}_${digest}`
 
     this.#tokens.set(token, {
       token,
@@ -152,5 +156,6 @@ export class TokenStore {
 
   clear(): void {
     this.#tokens = new Map()
+    this.#seq = 0
   }
 }

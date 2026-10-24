@@ -15,6 +15,7 @@ convention so tests read consistently:
 | `PNID_1` | a `phone_number_id` (a Graph object id, not a phone number) |
 | `WABA_1` | a WhatsApp Business Account id |
 | `wamid.TEST1` | a message id |
+| `MX.13491208655302741918` | a business-scoped user ID (BSUID): country code, a period, digits |
 
 ## Why the `+` asymmetry matters
 
@@ -35,10 +36,16 @@ lookups, session keys and dedupe. wamock reproduces this asymmetry deliberately.
 | `send-text-response.json` | the success body of `POST /{phone_number_id}/messages` |
 | `error-*.json` | Graph error bodies for the codes in spec §7 |
 
-## Note on `conversation` / `pricing`
+## Note on `pricing`
 
-Neither audited integration consumed the `conversation`/`pricing` objects that
-Meta attaches to `sent`/`delivered` statuses, so those fields are **modeled from
-Meta's public documentation rather than captured from traffic**. They are
-faithful in shape and field names; treat exact pricing category semantics as
-best-effort until corrected against a real capture.
+Neither audited integration consumed the `pricing` object that Meta attaches to
+one status per message, so `statuses-only.json` is **modeled from Meta's status
+webhook reference rather than captured from traffic**. It follows per-message
+pricing (`pricing_model: "PMP"`, in force since 2025-07-01). The `conversation`
+object is absent on purpose: v24.0 omits it outside free entry point windows.
+
+## These files are executed
+
+`test/fixtures-contract.test.ts` rebuilds every fixture from the real builders
+and requires an exact match. Changing a fixture changes what wamock claims Meta
+sends, so the builder has to change with it.

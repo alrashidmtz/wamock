@@ -38,7 +38,8 @@ const payload = (state: MockState) =>
     displayPhoneNumber: '15550001111',
     messageId: 'wamid.X',
     status: 'sent',
-    recipientId: '5215555000001',
+    user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+    sentTo: 'phone',
     timestampMs: EPOCH,
   })
 
@@ -132,7 +133,8 @@ describe('dispatchStatus', () => {
     h.dispatcher.dispatchStatus(h.state.defaultPhoneNumberId, {
       messageId: 'wamid.Y',
       status: 'read',
-      recipientId: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
       timestampMs: EPOCH,
     })
     await flush(h)
@@ -146,7 +148,8 @@ describe('dispatchStatus', () => {
     h.dispatcher.dispatchStatus('PNID_GHOST', {
       messageId: 'wamid.Y',
       status: 'read',
-      recipientId: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
       timestampMs: EPOCH,
     })
     await flush(h)

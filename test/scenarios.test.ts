@@ -162,20 +162,67 @@ describe('forced errors', () => {
   })
 })
 
-describe('conversations and pricing on statuses', () => {
-  it('bills a customer-initiated exchange as a service conversation', async () => {
+describe('per-message pricing on statuses', () => {
+  it('prices a reply to a customer as a free service message', async () => {
     const { e, received } = await harness()
     e.sendMessage(e.state.defaultPhoneNumberId, text)
 
     e.clock.advance(60_000)
     await e.settle()
 
-    const status = statusesFrom(received)[0]!
-    expect(status.pricing).toMatchObject({ billable: true, category: 'service' })
-    expect(status.conversation).toMatchObject({ origin: { type: 'service' } })
+    const priced = statusesFrom(received).filter((s) => s.pricing)
+    expect(priced).toHaveLength(1)
+    expect(priced[0]!.pricing).toEqual({
+      billable: false,
+      pricing_model: 'PMP',
+      type: 'free_customer_service',
+      category: 'service',
+    })
   })
 
-  it('bills a template-initiated exchange under the template category', async () => {
+  it('puts pricing on exactly one status per message, the delivered one', async () => {
+    // Meta sends it on `sent` or on one of `delivered`/`read`, never on both.
+    // A receiver that reads it off `sent` only would find nothing here.
+    const { e, received } = await harness()
+    e.sendMessage(e.state.defaultPhoneNumberId, text)
+
+    e.clock.advance(60_000)
+    await e.settle()
+
+    const statuses = statusesFrom(received)
+    expect(statuses.find((s) => s.status === 'sent')?.pricing).toBeUndefined()
+    expect(statuses.find((s) => s.status === 'delivered')?.pricing).toBeDefined()
+  })
+
+  it('keeps pricing on delivered when delivered arrives first', async () => {
+    const { e, received } = await harness()
+    e.scenario.configure({ outOfOrderStatuses: true })
+    e.sendMessage(e.state.defaultPhoneNumberId, text)
+
+    e.clock.advance(60_000)
+    await e.settle()
+
+    const statuses = statusesFrom(received)
+    expect(statuses[0]!.status).toBe('delivered')
+    expect(statuses[0]!.pricing).toBeDefined()
+    expect(statuses[1]!.pricing).toBeUndefined()
+  })
+
+  it('sends no conversation object at all', async () => {
+    // Omitted from v24.0 unless the message went out inside a free entry
+    // point window. Code that keys billing on conversation.id gets undefined.
+    const { e, received } = await harness()
+    e.sendMessage(e.state.defaultPhoneNumberId, text)
+
+    e.clock.advance(60_000)
+    await e.settle()
+
+    for (const status of statusesFrom(received)) {
+      expect(status).not.toHaveProperty('conversation')
+    }
+  })
+
+  it('bills a template under its category as a regular message', async () => {
     const received: string[] = []
     const e = new WamockEngine({
       appSecret: 's',
@@ -202,11 +249,17 @@ describe('conversations and pricing on statuses', () => {
     e.clock.advance(60_000)
     await e.settle()
 
-    expect(statusesFrom(received)[0]!.pricing).toMatchObject({ category: 'marketing' })
+    expect(statusesFrom(received).find((s) => s.pricing)!.pricing).toEqual({
+      billable: true,
+      pricing_model: 'PMP',
+      type: 'regular',
+      category: 'marketing',
+    })
   })
 
-  it('keeps several messages inside one conversation', async () => {
-    // The billing bug: ten messages in a day are ONE conversation, not ten.
+  it('prices every message on its own', async () => {
+    // The opposite of the old conversation model: two replies are two priced
+    // messages, each carrying its own pricing object.
     const { e, received } = await harness()
     e.sendMessage(e.state.defaultPhoneNumberId, text)
     e.sendMessage(e.state.defaultPhoneNumberId, text)
@@ -214,10 +267,17 @@ describe('conversations and pricing on statuses', () => {
     e.clock.advance(60_000)
     await e.settle()
 
-    const ids = new Set(
-      statusesFrom(received).map((s) => (s.conversation as { id: string } | undefined)?.id),
-    )
-    expect(ids.size).toBe(1)
+    expect(statusesFrom(received).filter((s) => s.pricing)).toHaveLength(2)
+  })
+
+  it('spends the free tier even when the webhooks are dropped', async () => {
+    const { e } = await harness()
+    e.scenario.configure({ webhookFailureRate: 1 })
+    e.sendMessage(e.state.defaultPhoneNumberId, text)
+    e.scenario.reset()
+
+    for (let i = 0; i < 999; i++) e.pricing.price(e.state.defaultPhoneNumberId, 'service', e.clock.now())
+    expect(e.pricing.price(e.state.defaultPhoneNumberId, 'service', e.clock.now())['type']).toBe('regular')
   })
 })
 

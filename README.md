@@ -69,6 +69,30 @@ mock.
 Normalize one and forget the other and you end up with two different keys for
 the same human — which quietly breaks opt-out lookups, session keys and dedupe.
 
+### The customer's phone number may not be there at all
+
+Since April 2026 every message webhook carries a **business-scoped user ID**
+(`user_id`, e.g. `MX.13491208655302741918`). A customer who adopts a WhatsApp
+username stops disclosing their phone number: unless your number was in contact
+with that phone number in the last 30 days, `wa_id` and `from` are simply absent.
+
+```jsonc
+{
+  "contacts": [{ "profile": { "username": "pablomorales" }, "user_id": "MX.1349…" }],
+  "messages": [{ "from_user_id": "MX.1349…", "type": "text" }]   // no "from"
+}
+```
+
+Key customers on `wa_id` and these messages have no owner. The BSUID is the one
+identifier that is always there. It is scoped to the business portfolio, and it
+changes when the customer changes numbers (announced as a `system` message). Send
+to it with `recipient` instead of `to`:
+
+```bash
+curl -X POST localhost:4004/__mock/inbound \
+  -d '{"from":"5215555000001","text":"hola","username":"pablomorales"}'
+```
+
 ### Template approval is **per language**
 
 `order_update` being APPROVED in `es_MX` tells you nothing about `en_US`.
@@ -103,10 +127,50 @@ template, not a retry. wamock lets you cross that boundary instantly:
 curl -X POST localhost:4004/__mock/time/advance -d '{"ms":90000000}'
 ```
 
-### Billing is per conversation, not per message
+### Billing is per message, and `pricing` rides on one status
 
-Statuses carry `conversation` and `pricing`. Ten messages inside one 24-hour
-window are **one** billable conversation. Counting messages over-reports cost.
+Since July 2025 Meta prices every delivered **message** (`pricing_model:
+"PMP"`). The `pricing` object appears on **one** status per message (`sent`,
+or one of `delivered`/`read`), never on each. wamock puts it on `delivered`, so
+code that reads it off `sent` alone finds nothing. The `conversation` object is
+gone too: v24.0 omits it outside free entry point windows, and billing keyed on
+`conversation.id` quietly counts zero.
+
+```jsonc
+"pricing": { "billable": false, "pricing_model": "PMP",
+             "type": "free_customer_service", "category": "service" }
+```
+
+Since October 1, 2026 replies are no longer free without limit. Each business
+number gets 1,000 free service messages a month (`free_customer_service`), and
+the 1,001st is `regular`, billable. Templates are always `regular`, utility
+included.
+
+A customer who writes in from a **Click-to-WhatsApp ad** changes the picture:
+your reply inside the service window opens a 7-day free entry point window in
+which everything is free, marketing included (`type: "free_entry_point"`), and
+the only place v24.0 still sends a `conversation` object.
+
+Unlike the quirks above, this one comes from Meta's documentation, not from
+production traffic. See the caveat under [Fidelity](#fidelity).
+
+### A stopped customer fails on the status, not on the send
+
+A customer who taps "Stop" on your marketing sends you a `user_preferences`
+webhook, and nothing else. Marketing templates to them are still **accepted**,
+then fail on their status with `131050`. An integration that only checks the
+send response keeps paying for campaigns nobody receives.
+
+### Paused templates come back on their own, until the third time
+
+A template Meta pauses for quality returns by itself after 3 hours the first
+time and 6 hours the second (`other_info.title: "UNPAUSE"`). The third pause
+disables it for good (`132016`). Meta may also **recategorize** an approved
+template, utility to marketing say. It warns 24 hours ahead with a
+`template_category_update` in which `new_category` still holds the *current*
+category, then switches. The template stays APPROVED and nothing fails: only the
+bill changes.
+
 
 ### Signatures cover the raw bytes
 
@@ -180,8 +244,8 @@ await mock.time.advance(60_000)   // now `sent` and `delivered` have arrived
 This is deliberate: real statuses do not arrive synchronously either, and a
 mock that delivered them instantly would hide every ordering bug.
 
-Anything with **no** delay of its own — an inbound message, a quality change, a
-template transition — arrives before the call that caused it returns, whether
+Anything with **no** delay of its own — an inbound message, a messaging-limit
+change, a template transition — arrives before the call that caused it returns, whether
 you made it through a helper or with `curl` against the control API. You never
 have to advance the clock to see those.
 
@@ -228,13 +292,17 @@ The returned `mock`:
 
 | Member | What it does |
 |---|---|
-| `inbound({ from, text \| buttonReply \| listReply, name?, phoneNumberId? })` | A customer writes; opens the 24h window |
-| `send({ to, text \| template \| interactive, phoneNumberId? })` | Send as your app would; rejects with Meta's error code |
+| `inbound({ from, text \| buttonReply \| listReply, name?, username?, referral?, phoneNumberId? })` | A customer writes; opens the 24h window. `username` hides their phone number; `referral` marks a Click-to-WhatsApp ad |
+| `send({ to \| recipient, text \| template \| interactive, phoneNumberId? })` | Send as your app would, to a phone number or a BSUID; rejects with Meta's error code |
 | `time.advance(ms)` · `time.now()` | Move virtual time; everything due fires |
 | `approveTemplate({ name, language, category? })` | Create a template already APPROVED |
-| `transitionTemplate({ name, language, to })` | Play Meta's reviewer: APPROVED, PAUSED, REJECTED… |
+| `transitionTemplate({ name, language, to })` | Play Meta's reviewer: APPROVED, PAUSED, REJECTED… Pauses lift themselves; the third disables |
+| `recategorizeTemplate({ name, language, to, notice? })` | Meta's automated recategorization: a notice now, the change 24h later |
+| `setUserPreference({ from, value })` | A customer stops or resumes marketing (`stop` \| `resume`) |
+| `changeUserNumber({ from, to })` | A customer changes numbers; their BSUID changes with it |
 | `expectSent(criteria)` | Assert on sent traffic; returns the match, throws with what *was* sent |
 | `messages()` | Everything sent, for custom assertions |
+| `readReceipts()` | Every mark-as-read, with whether it asked for a typing indicator |
 | `scenario(config)` | Latency, failure rates, duplication, ordering, forced errors |
 | `reset()` | Back to the seed state |
 | `close()` | Stop everything and restore anything it patched |
@@ -311,16 +379,31 @@ base URL or an HTTP proxy.
 | Virtual clock — expire the window instantly | ✅ | ❌ | ❌ |
 | Duplicate / out-of-order webhooks | ✅ | ❌ | ❌ |
 | Faithful error codes and HTTP statuses | ✅ | partial | ✅ |
-| Conversation + pricing objects | ✅ | ❌ | partial |
+| Per-message pricing objects (PMP, monthly free tier) | ✅ | ❌ | partial |
+| Messaging limits shared across the business portfolio | ✅ | ❌ | ❌ |
+| Business-scoped user IDs, usernames, sends to a BSUID | ✅ | ❌ | partial |
+| Free entry point windows (Click-to-WhatsApp ads) | ✅ | ❌ | ❌ |
+| Marketing opt-out (`user_preferences`, `131050`) | ✅ | ❌ | partial |
+| Mark as read and typing indicators | ✅ | partial | ✅ |
+| Coexistence with the WhatsApp Business app | ✅ | ❌ | partial |
 | Interactive limits enforced (3 buttons, 10 rows) | ✅ | ❌ | ✅ |
 | Works offline, in CI | ✅ | ✅ | ❌ |
 | Vendor-neutral | ✅ | ✅ | ❌ |
 
-**Honest caveat:** the `conversation` and `pricing` objects are modeled from
-Meta's public documentation rather than captured from production traffic. The
-shape and field names are faithful; treat the finer points of category
-assignment as best-effort. Everything else was verified against two production
-integrations.
+**Honest caveat:** the `pricing` object, the portfolio messaging limits,
+business-scoped user IDs, free entry point windows, `user_preferences` and the
+template pause and recategorization flows, and coexistence are modeled from
+Meta's documentation
+rather than captured from production traffic. A BSUID's digits come from a hash
+of the portfolio and phone number, so they are stable across runs but not what
+Meta would issue.
+Field names and values follow Meta's reference. Two simplifications are
+deliberate: the free tier resets at midnight UTC (Meta uses the account's
+timezone), and it is counted at send time (Meta counts deliveries). Where Meta's
+own reference contradicts itself, wamock picks one form and says so in the code.
+`business_capability_update` sends the limit as a number (`2000`, `-1` for
+unlimited), following Meta's example over its prose. Everything else was
+verified against two production integrations.
 
 ---
 
@@ -330,15 +413,15 @@ integrations.
 
 | Endpoint | Notes |
 |---|---|
-| `POST /{version}/{phone_number_id}/messages` | `text`, `template`, `interactive` (button + list) |
-| `POST /{version}/{waba_id}/message_templates` | → `PENDING`; duplicates return "already exists" |
-| `GET /{version}/{waba_id}/message_templates` | list with per-language status |
+| `POST /{version}/{phone_number_id}/messages` | `text`, `template`, `interactive` (button + list), addressed by `to` or `recipient` (BSUID). Also mark-as-read, with an optional typing indicator: `{status:"read", message_id, typing_indicator?}` |
+| `POST /{version}/{waba_id}/message_templates` | → `PENDING`; duplicates return "already exists"; `parameter_format` `named`\|`positional` |
+| `GET /{version}/{waba_id}/message_templates` | Meta's shape: `name`, `parameter_format`, `components`, `language`, `status`, `category`, `id` |
 | `DELETE /{version}/{waba_id}/message_templates?name=` | deletes every language |
 | `POST /{version}/{phone_number_id}/media` | stub — valid id, no bytes |
 | `GET /{version}/{media_id}` | URL that expires after ~5 minutes |
 
 Any `vNN.N` version segment is accepted — real integrations are scattered
-across v17 through v23.
+across v17 through v26, the latest.
 
 ### Control API — what Meta doesn't give you
 
@@ -349,15 +432,18 @@ Graph routes stay strict, where matching Meta is the point.
 
 | Endpoint | Request body | What it does |
 |---|---|---|
-| `POST /__mock/inbound` | `{from, text}` · or `{from, button_reply:{id,title}}` · or `{from, list_reply:{id,title,description?}}` — plus optional `name`, `phone_number_id` | a customer writes; opens/renews the 24h window |
+| `POST /__mock/inbound` | `{from, text}` · or `{from, button_reply:{id,title}}` · or `{from, list_reply:{id,title,description?}}` — plus optional `name`, `username`, `referral`, `phone_number_id` | a customer writes; opens/renews the 24h window |
+| `POST /__mock/users/preferences` | `{from, value}` — `stop\|resume`; optional `phone_number_id` | a customer stops or resumes marketing; announces `user_preferences` |
+| `POST /__mock/users/change-number` | `{from, to}`; optional `phone_number_id` | a customer changes numbers; announces a `system` message with the new BSUID |
 | `POST /__mock/statuses` | `{id, status}` where `status` is `sent\|delivered\|read\|failed`; optional `error` (a numeric code) | force a message to a status Meta would not produce on its own |
 | `POST /__mock/time/advance` | `{ms}` | move the virtual clock; fires everything due |
-| `POST /__mock/templates/{name}/{language}/transition` | `{to}` — `APPROVED\|REJECTED\|PAUSED\|PENDING\|DISABLED`; optional `?waba_id=` | play Meta's reviewer |
+| `POST /__mock/templates/{name}/{language}/transition` | `{to}` — `APPROVED\|REJECTED\|PAUSED\|PENDING\|DISABLED`; optional `?waba_id=` | play Meta's reviewer; a pause lifts after 3h, then 6h, and the third disables |
+| `POST /__mock/templates/{name}/{language}/recategorize` | `{to, notice?}` — `UTILITY\|MARKETING\|AUTHENTICATION`; optional `?waba_id=` | Meta's automated recategorization: notice now, change in 24h |
 | `POST /__mock/scenario` | `{seed?, latencyMs?, sendFailureRate?, webhookFailureRate?, duplicateWebhooks?, outOfOrderStatuses?, nextError?:{code,times?}}` | latency, failure rates, duplication, ordering |
-| `POST /__mock/embedded-signup` | `{subscribed?}` | mint a signup code, optionally with the WABA unsubscribed |
+| `POST /__mock/embedded-signup` | `{subscribed?, business_id?}` | mint a signup code, optionally with the WABA unsubscribed or under an existing business portfolio |
 | `POST /__mock/tokens` | `{kind?, scopes?}` — `permanent\|short\|long` | mint a token to exercise expiry and missing scopes |
-| `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN`; optional `phone_number_id` | change a number's quality and announce it |
-| `POST /__mock/tier` | `{tier}` — `TIER_250\|TIER_1K\|…`; optional `phone_number_id` | set the messaging limit tier |
+| `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN`; optional `phone_number_id` | change a number's quality rating, silently (see below) |
+| `POST /__mock/tier` | `{tier}` — `TIER_250\|TIER_2K\|TIER_10K\|TIER_100K\|TIER_UNLIMITED`, or wamock's `TIER_1\|TIER_2`; optional `phone_number_id` | set the messaging limit of that number's business portfolio; announces `business_capability_update` |
 | `POST /__mock/reset` | `{}` | back to the seed state |
 | `GET /__mock/state` · `GET /__mock/messages` | — | inspect |
 
@@ -377,7 +463,7 @@ that breaks and that no other mock covers.
 | `GET /{version}/debug_token` | `is_valid` + `expires_at` (`0` = never expires) |
 | `POST /{version}/{waba_id}/subscribed_apps` | without it, webhooks never arrive |
 | `GET /{version}/{waba_id}/subscribed_apps` | list subscriptions |
-| `GET /{version}/{phone_number_id}?fields=` | `display_phone_number`, `quality_rating`, `messaging_limit_tier` |
+| `GET /{version}/{phone_number_id}?fields=` | `display_phone_number`, `quality_rating`, `whatsapp_business_manager_messaging_limit` (and the deprecated `messaging_limit_tier`, same value) |
 
 Control endpoints: `POST /__mock/embedded-signup`, `POST /__mock/tokens`,
 `POST /__mock/quality`, `POST /__mock/tier`.
@@ -407,8 +493,57 @@ Control endpoints: `POST /__mock/embedded-signup`, `POST /__mock/tokens`,
 compares it numerically against the clock rejects exactly the System User
 tokens that are safe to use.
 
-Messaging tiers cap **unique recipients per rolling 24 hours**, not messages —
-so metering message volume tells you nothing about how close you are.
+Messaging limits cap **unique recipients reached outside a customer service
+window per rolling 24 hours**, not messages, so metering message volume tells
+you nothing about how close you are. Replies to customers who wrote first never
+count. Since October 2025 the limit belongs to the **business portfolio**: every
+number in it draws on the same cap, and one busy number can block its siblings.
+
+No webhook announces a number's **quality rating** any more.
+`phone_number_quality_update` now reports throughput and limit changes only, so
+a receiver waiting on it for a downgrade waits forever. Poll
+`?fields=quality_rating` instead.
+
+### Coexistence — the WhatsApp Business app and Cloud API on one number
+
+A business already on the **WhatsApp Business app** can onboard its number to
+Cloud API and keep using the app. Half of every conversation then happens where
+your integration cannot see it.
+
+```bash
+curl -X POST localhost:4004/__mock/embedded-signup \
+  -d '{"coexistence":true,"contacts":[{"phone":"5215555000001","full_name":"Pablo Morales"}]}'
+```
+
+What wamock reproduces:
+
+- **Replies from the app arrive only as `smb_message_echoes`.** They open no
+  service window and cost nothing, so a customer answered from the app still
+  needs a template from Cloud API.
+- **Contacts and chat history sync once each, within 24 hours.** Call
+  `POST /{phone_number_id}/smb_app_data` with `sync_type` `smb_app_state_sync`
+  or `history`. A second call fails with `2593107` and a late one with
+  `2593108`. History arrives in phases by age (`phase` 0, 1, 2; `progress` up
+  to 100), or as `2593109` if the business declined to share it. Customers seen
+  only in history have no open window.
+- **Throughput is fixed at 20 messages per second** (`130429` past it).
+- **About 14 days without the app in use disconnects the number**
+  (`PARTNER_REMOVED`, `PRIMARY_INACTIVITY`). Sends then fail with `133010`, and
+  `is_on_biz_app` reads `false`. A device change offboards the number
+  (`ACCOUNT_OFFBOARDED`) until it reconnects (`ACCOUNT_RECONNECTED`).
+
+| Endpoint | Request body | What it does |
+|---|---|---|
+| `POST /{version}/{phone_number_id}/smb_app_data` | `{messaging_product, sync_type}` | Graph: request contacts or history |
+| `POST /__mock/embedded-signup` | `{coexistence: true, share_history?, contacts?, history?}` | onboard a Business app number; announces `PARTNER_ADDED`. `history` is `[{phone, messages:[{direction:"in"\|"out", text, ago_ms}]}]` |
+| `POST /__mock/app/send` | `{phone_number_id, to, text}` | the business replies from the app |
+| `POST /__mock/app/contacts` | `{phone_number_id, phone, full_name?, first_name?, action?}` | a contact is added, edited or removed in the app |
+| `POST /__mock/app/offboard` | `{phone_number_id, reconnect?}` | the business changes device |
+
+In a test, the same is `mock.engine.createSignup({ coexistence: true, … })` and
+`mock.businessApp.send / contact / offboard`. Not emulated: media in history,
+group chats, companion devices, and Embedded Signup's popup itself. wamock hands
+you its result.
 
 ### Error catalogue
 
@@ -417,15 +552,26 @@ so metering message volume tells you nothing about how close you are.
 | `131047` | free-form outside the 24h window | no — send a template |
 | `132001` | no template for that name + language | no |
 | `132015` | template paused by Meta | no, until it transitions back |
+| `132016` | template disabled for good after repeated pauses | no — create a new template |
 | `131026` | recipient cannot receive | no |
-| `131048` | spam / quality rate limit | yes, with backoff |
+| `131050` | the customer stopped your marketing — on the **status**, not the send | no |
+| `131009` | parameter value not valid, e.g. marking an unknown message as read, or a BSUID from another portfolio | no |
+| `131062` | sending an authentication template to a BSUID | no — use the phone number |
+| `133010` | a coexistence number that was disconnected or is offboarded | no — the business must reconnect |
+| `2593107` / `2593108` | `smb_app_data` called twice, or 24h or more after onboarding | no — offboard and onboard again |
+| `131048` | spam / quality rate limit, or the portfolio's messaging limit | yes, with backoff |
 | `130429` | throughput rate limit | yes |
 | `100` | invalid parameter (incl. interactive limits) | no |
 | `190` / `0` | token expired or invalid | no — re-auth |
 | `131000` | transient Meta-side failure | yes |
 
 Each returns Meta's real HTTP status too: `429` for `130429`, `401` for `190`,
-`400` for the rest.
+`400` for the rest. Token errors (`190`, `0`) carry no `(#code)` prefix in their
+message, unlike every messaging error, so a log parser keyed on `(#190)` never
+sees an expired token.
+
+On a `failed` status, each error carries `code`, `title`, `message` (the same as
+`title`), `error_data.details` and `href`. The explanation is in `details`.
 
 ---
 
@@ -493,7 +639,8 @@ network, and never point it at production data.
 ## Not in v1
 
 No GUI, no disk persistence, no multi-tenant auth, no real media storage, no
-WhatsApp Flows or calling. See `CHANGELOG.md` for what's planned.
+WhatsApp Flows, calling, groups or the Marketing Messages API. See
+`CHANGELOG.md` for what changed.
 
 ### It emulates Meta directly, not a BSP wrapper
 

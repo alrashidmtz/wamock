@@ -161,7 +161,8 @@ describe('sendMessage — scheduled delivery statuses', () => {
 
     const statuses = e.deliverer
       .log()
-      .map((d) => d.payload.entry[0]!.changes[0]!.value.statuses?.[0])
+      .map((d) => d.payload.entry[0]!.changes[0]!)
+      .map((change) => (change.field === 'messages' ? change.value.statuses?.[0] : undefined))
       .filter(Boolean)
 
     expect(statuses.map((s) => s!.status)).toEqual(['sent', 'delivered'])

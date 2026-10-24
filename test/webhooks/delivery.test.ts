@@ -15,7 +15,8 @@ const samplePayload = () =>
     displayPhoneNumber: '15550001111',
     messageId: 'wamid.OUT1',
     status: 'sent',
-    recipientId: '5215555000001',
+    user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+    sentTo: 'phone',
     timestampMs: EPOCH,
   })
 
@@ -63,7 +64,8 @@ describe('WebhookDeliverer — scheduling', () => {
       displayPhoneNumber: '15550001111',
       messageId: 'wamid.SECOND',
       status: 'delivered',
-      recipientId: '5215555000001',
+      user: { waId: '5215555000001', userId: 'MX.1', phoneShared: true },
+      sentTo: 'phone',
       timestampMs: EPOCH,
     })
 

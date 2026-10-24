@@ -1,4 +1,6 @@
 import { MediaService } from '../graph/media-service.js'
+import { CoexistenceService } from '../graph/coexistence-service.js'
+import type { CoexistenceSeed } from '../graph/coexistence-service.js'
 import { MessagingService } from '../graph/messaging-service.js'
 import type { SendMessageResponse, SimulateInboundOptions } from '../graph/messaging-service.js'
 import { TechProviderService } from '../graph/tech-provider-service.js'
@@ -10,12 +12,13 @@ import { nullTransport } from '../webhooks/transport.js'
 import type { WebhookTransport } from '../webhooks/transport.js'
 import { VirtualClock } from './clock.js'
 import type { MockContext } from './context.js'
-import { Conversations } from './conversations.js'
+import { Pricing } from './pricing.js'
+import { Users } from './users.js'
 import { makeFbtraceId } from './ids.js'
 import { MessagingLimits } from './limits.js'
 import { ScenarioController } from './scenario.js'
 import { MockState } from './state.js'
-import type { Template, TemplateStatus } from './templates.js'
+import type { Template, TemplateCategory, TemplateStatus, TemplateView } from './templates.js'
 import type { DebugTokenData, TokenKind } from './tokens.js'
 import { TokenStore } from './tokens.js'
 import type { MessagingTier, QualityRating } from './types.js'
@@ -75,7 +78,8 @@ export class WamockEngine {
   readonly deliverer: WebhookDeliverer
   readonly windows: ServiceWindows
   readonly scenario = new ScenarioController()
-  readonly conversations = new Conversations()
+  readonly pricing = new Pricing()
+  readonly users = new Users()
   readonly tokens = new TokenStore()
   readonly limits = new MessagingLimits()
   readonly dispatcher: WebhookDispatcher
@@ -84,6 +88,7 @@ export class WamockEngine {
   readonly #templates: TemplateService
   readonly #media: MediaService
   readonly #techProvider: TechProviderService
+  readonly #coexistence: CoexistenceService
   /** Set while `flush()` runs, so a re-entrant call cannot deadlock on itself. */
   #flushing = false
 
@@ -117,7 +122,8 @@ export class WamockEngine {
       state: this.state,
       scenario: this.scenario,
       windows: this.windows,
-      conversations: this.conversations,
+      pricing: this.pricing,
+      users: this.users,
       tokens: this.tokens,
       limits: this.limits,
       dispatcher: this.dispatcher,
@@ -126,9 +132,10 @@ export class WamockEngine {
     this.#templates = new TemplateService(context)
     // Messaging needs template lookups on the send path; the two collaborate
     // through a narrow interface rather than merging into one service.
-    this.#messaging = new MessagingService(context, this.#templates)
+    this.#coexistence = new CoexistenceService(context)
+    this.#messaging = new MessagingService(context, this.#templates, this.#coexistence)
     this.#media = new MediaService(context)
-    this.#techProvider = new TechProviderService(context)
+    this.#techProvider = new TechProviderService(context, this.#coexistence)
   }
 
   /** A deterministic `fbtrace_id` for the next error. */
@@ -165,11 +172,11 @@ export class WamockEngine {
   /**
    * Deliver everything already due, then wait for the receiver to take it.
    *
-   * Webhooks with no delay of their own — an inbound message, a quality change,
+   * Webhooks with no delay of their own — an inbound message, a limit change,
    * a template transition — are scheduled at the current instant, and a frozen
    * clock never reaches an instant on its own. Without this they sat there
-   * until something moved time, which made `POST /__mock/quality` look like it
-   * had failed to announce anything (#4). Both front doors call it, so the
+   * until something moved time, which made a control call look like it had
+   * failed to announce anything (#4). Both front doors call it, so the
    * library and the control API cannot answer differently.
    *
    * When frozen, rounds repeat while deliveries keep happening, so a handler
@@ -209,17 +216,35 @@ export class WamockEngine {
 
   reset(): void {
     this.#media.clear()
+    this.#templates.clear()
+    this.#coexistence.clear()
     this.#techProvider.clear()
     this.deliverer.clear()
     this.state.reset()
     this.windows.clear()
     this.scenario.reset()
-    this.conversations.clear()
+    this.pricing.clear()
+    this.users.clear()
     this.tokens.clear()
     this.limits.clear()
   }
 
   // --- messaging -----------------------------------------------------------
+
+  /**
+   * `POST /{version}/{phone_number_id}/messages`, whatever the body asks for.
+   * The same route sends a message and marks one as read; Meta tells them
+   * apart by `status: "read"`, and so does wamock.
+   */
+  postMessages(
+    phoneNumberId: string,
+    body: Record<string, unknown>,
+    accessToken?: string,
+  ): SendMessageResponse | { success: true } {
+    return body['status'] === 'read'
+      ? this.#messaging.markRead(phoneNumberId, body, accessToken)
+      : this.#messaging.send(phoneNumberId, body, accessToken)
+  }
 
   sendMessage(
     phoneNumberId: string,
@@ -231,6 +256,16 @@ export class WamockEngine {
 
   simulateInbound(options: SimulateInboundOptions): { messageId: string } {
     return this.#messaging.simulateInbound(options)
+  }
+
+  setUserPreference(options: { from: string; value: 'stop' | 'resume'; phoneNumberId?: string }): {
+    success: true
+  } {
+    return this.#messaging.setUserPreference(options)
+  }
+
+  changeUserNumber(options: { from: string; to: string; phoneNumberId?: string }): { success: true } {
+    return this.#messaging.changeUserNumber(options)
   }
 
   forceStatus(
@@ -247,12 +282,21 @@ export class WamockEngine {
     return this.#templates.create(wabaId, body)
   }
 
-  listTemplates(wabaId: string): { data: Template[] } {
+  listTemplates(wabaId: string): { data: TemplateView[] } {
     return this.#templates.list(wabaId)
   }
 
   deleteTemplate(wabaId: string, name: string): { success: true } {
     return this.#templates.delete(wabaId, name)
+  }
+
+  recategorizeTemplate(
+    wabaId: string,
+    name: string,
+    language: string,
+    options: { to: TemplateCategory; notice?: boolean },
+  ): { success: true } {
+    return this.#templates.recategorize(wabaId, name, language, options)
   }
 
   template(wabaId: string, name: string, language: string): Template | undefined {
@@ -280,12 +324,41 @@ export class WamockEngine {
 
   // --- tech provider -------------------------------------------------------
 
-  createSignup(options: { subscribed?: boolean } = {}): {
+  createSignup(
+    options: { subscribed?: boolean; businessId?: string; coexistence?: boolean } & CoexistenceSeed = {},
+  ): {
     code: string
     phone_number_id: string
     waba_id: string
   } {
     return this.#techProvider.createSignup(options)
+  }
+
+  // --- coexistence -------------------------------------------------------
+
+  syncBusinessAppData(
+    phoneNumberId: string,
+    body: Record<string, unknown>,
+  ): { messaging_product: 'whatsapp'; request_id: string } {
+    return this.#coexistence.sync(phoneNumberId, body)
+  }
+
+  businessAppSend(options: { phoneNumberId: string; to: string; text: string }): { success: true } {
+    return this.#coexistence.appSend(options)
+  }
+
+  businessAppContact(options: {
+    phoneNumberId: string
+    phone: string
+    full_name?: string
+    first_name?: string
+    action?: 'add' | 'remove'
+  }): { success: true } {
+    return this.#coexistence.appContact(options)
+  }
+
+  businessAppOffboard(options: { phoneNumberId: string; reconnect?: boolean }): { success: true } {
+    return this.#coexistence.appOffboard(options)
   }
 
   exchangeCode(

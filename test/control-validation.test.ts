@@ -168,3 +168,15 @@ describe('optional control-API parameters take effect', () => {
     expect(engine.state.phoneNumber(engine.state.defaultPhoneNumberId)?.qualityRating).not.toBe('RED')
   })
 })
+
+describe('POST /__mock/embedded-signup names what is wrong', () => {
+  it.each([
+    [{ business_id: '' }, 'business_id: String must contain at least 1 character(s)'],
+    [{ subscribe: false }, "Unrecognized key(s) in object: 'subscribe'"],
+    [{ coexistence: 'yes' }, 'coexistence: Expected boolean, received string'],
+  ])('%j', async (body, expected) => {
+    const res = await post('/__mock/embedded-signup', body)
+    expect(res.statusCode).toBe(400)
+    expect(detailOf(res)).toBe(expected)
+  })
+})

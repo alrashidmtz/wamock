@@ -170,6 +170,16 @@ describe('template state gates template sends', () => {
     expect(codeOf(() => e.sendMessage(e.state.defaultPhoneNumberId, template()))).toBe(132015)
   })
 
+  it('rejects a DISABLED template with 132016, not as merely paused', () => {
+    // A paused template comes back; a disabled one never does. Reporting both
+    // as 132015 tells an integration to wait for something that will not return.
+    const e = engine()
+    approvedTemplate(e)
+    e.transitionTemplate(e.state.defaultWabaId, 'order_update', 'es_MX', 'DISABLED')
+
+    expect(codeOf(() => e.sendMessage(e.state.defaultPhoneNumberId, template()))).toBe(132016)
+  })
+
   it('sends again once a paused template is reinstated', () => {
     const e = engine()
     approvedTemplate(e)

@@ -15,8 +15,8 @@
  * The alternative worth knowing about is a strict mode where the window never
  * renews, only opens once, which makes expiry tests shorter to write. It is
  * deliberately not the default: a mock that is stricter than production teaches
- * integrations to send templates they did not need, which costs real money per
- * conversation. If you want it, pass a shorter `windowMs` instead — that gets
+ * integrations to send templates they did not need, and every template is a
+ * billed message. If you want it, pass a shorter `windowMs` instead — that gets
  * you fast expiry without diverging from Meta's semantics.
  *
  * ## Scope
@@ -43,6 +43,11 @@ export class ServiceWindows {
 
   constructor(options: ServiceWindowOptions = {}) {
     this.#windowMs = options.windowMs ?? WINDOW_MS
+  }
+
+  /** How long a window lasts, as configured. */
+  get windowMs(): number {
+    return this.#windowMs
   }
 
   /** Note that the customer wrote, opening or renewing their window. */

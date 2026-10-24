@@ -57,10 +57,12 @@ app.post('/webhook', async (req, res) => {
 
       // Delivery receipts arrive WITHOUT a `messages` key — not an empty
       // array. `value.messages.forEach(...)` would crash on every one.
+      // Billing is per message, and `pricing` rides on only ONE status per
+      // message — read it wherever it appears, never off `sent` alone.
       for (const status of value.statuses ?? []) {
         console.log(
           `status ${status.id} → ${status.status}` +
-            (status.pricing ? ` (${status.pricing.category} conversation)` : ''),
+            (status.pricing ? ` (${status.pricing.category}, ${status.pricing.type})` : ''),
         )
       }
 
@@ -75,7 +77,7 @@ app.post('/webhook', async (req, res) => {
 })
 
 async function reply(to, text) {
-  const response = await fetch(`${GRAPH_BASE}/v19.0/${PHONE_NUMBER_ID}/messages`, {
+  const response = await fetch(`${GRAPH_BASE}/v26.0/${PHONE_NUMBER_ID}/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer test-token' },
     body: JSON.stringify({ messaging_product: 'whatsapp', to, type: 'text', text: { body: text } }),

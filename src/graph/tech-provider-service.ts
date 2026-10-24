@@ -1,12 +1,14 @@
-import { randomBytes } from 'node:crypto'
+import { createHash } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
 import { assertToken, requirePhoneNumber, requireWaba } from '../core/guards.js'
+import { TIER_CAPS } from '../core/limits.js'
 import { toDisplayPhoneNumber } from '../core/phone.js'
 import type { DebugTokenData, TokenKind } from '../core/tokens.js'
 import type { MessagingTier, QualityRating } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
-import { buildQualityUpdatePayload } from '../webhooks/tech-payloads.js'
+import type { CoexistenceSeed, CoexistenceService } from './coexistence-service.js'
+import { buildBusinessCapabilityPayload } from '../webhooks/tech-payloads.js'
 
 /**
  * Tech Provider mode (spec §9) — onboarding OTHER businesses onto your own
@@ -18,6 +20,19 @@ import { buildQualityUpdatePayload } from '../webhooks/tech-payloads.js'
  * was never subscribed and therefore delivers nothing at all.
  */
 
+/**
+ * `base`, or `base_2`, `base_3`… if something already claimed it. A generated
+ * id must never land on one a test registered by hand: registering it again
+ * would overwrite that WABA or number, and a shared portfolio id would make
+ * the tenant share someone else's messaging limit.
+ */
+function freshId(base: string, taken: (id: string) => boolean): string {
+  if (!taken(base)) return base
+  let n = 2
+  while (taken(`${base}_${n}`)) n++
+  return `${base}_${n}`
+}
+
 interface SignupCode {
   wabaId: string
   phoneNumberId: string
@@ -27,9 +42,12 @@ interface SignupCode {
 export class TechProviderService {
   readonly #context: MockContext
   readonly #signupCodes = new Map<string, SignupCode>()
+  /** Business app onboarding happens through signup; the rest lives there. */
+  readonly #coexistence: CoexistenceService
 
-  constructor(context: MockContext) {
+  constructor(context: MockContext, coexistence: CoexistenceService) {
     this.#context = context
+    this.#coexistence = coexistence
   }
 
   /**
@@ -39,20 +57,31 @@ export class TechProviderService {
    *
    * `subscribed: false` creates the tenant WITHOUT subscribing your app — the
    * state that makes inbound messages vanish with no error anywhere.
+   *
+   * Each tenant is its own business portfolio unless `businessId` names one,
+   * which puts the new number under that portfolio's shared messaging limit.
+   *
+   * `coexistence: true` onboards a number already in use on the WhatsApp
+   * Business app, with whatever contacts and history the app holds.
    */
-  createSignup(options: { subscribed?: boolean } = {}): {
+  createSignup(
+    options: { subscribed?: boolean; businessId?: string; coexistence?: boolean } & CoexistenceSeed = {},
+  ): {
     code: string
     phone_number_id: string
     waba_id: string
   } {
     const { state } = this.#context
     const seq = state.nextSeq()
-    const wabaId = `WABA_TENANT_${seq}`
-    const phoneNumberId = `PNID_TENANT_${seq}`
+    const wabaId = freshId(`WABA_TENANT_${seq}`, (id) => !!state.waba(id))
+    const phoneNumberId = freshId(`PNID_TENANT_${seq}`, (id) => !!state.phoneNumber(id))
+    const businessId = options.businessId ?? freshId(`BUSINESS_TENANT_${seq}`, (id) => !!state.business(id))
+    if (!state.business(businessId)) state.registerBusiness(businessId)
 
     state.registerWaba({
       wabaId,
       appId: state.defaultAppId,
+      businessId,
       subscribedApps: options.subscribed === false ? new Set() : new Set([state.defaultAppId]),
     })
     state.registerPhoneNumber({
@@ -61,8 +90,18 @@ export class TechProviderService {
       displayPhoneNumber: `1555000${String(seq).padStart(4, '0')}`,
     })
 
-    const code = `AQD${randomBytes(16).toString('base64url')}`
+    // Derived from the counter, not drawn at random: two identical runs must
+    // mint identical codes, like every other id in wamock.
+    const code = `AQD${createHash('sha256').update(`signup:${seq}`).digest('base64url').slice(0, 22)}`
     this.#signupCodes.set(code, { wabaId, phoneNumberId, used: false })
+
+    if (options.coexistence === true) {
+      this.#coexistence.onboard(phoneNumberId, {
+        ...(options.shareHistory !== undefined ? { shareHistory: options.shareHistory } : {}),
+        ...(options.contacts !== undefined ? { contacts: options.contacts } : {}),
+        ...(options.history !== undefined ? { history: options.history } : {}),
+      })
+    }
     return { code, phone_number_id: phoneNumberId, waba_id: wabaId }
   }
 
@@ -163,13 +202,19 @@ export class TechProviderService {
       })
     }
 
+    const limit = this.#context.state.business(this.#context.state.businessIdOf(phoneNumberId) ?? '')
+      ?.messagingTier ?? 'TIER_UNLIMITED'
     const available: Record<string, unknown> = {
       display_phone_number: toDisplayPhoneNumber(phoneNumber.displayPhoneNumber),
       verified_name: 'wamock Test Business',
       quality_rating: phoneNumber.qualityRating ?? 'GREEN',
-      messaging_limit_tier: phoneNumber.messagingTier ?? 'TIER_UNLIMITED',
+      // The portfolio's limit, under the current field and the deprecated one
+      // that Meta still answers. Both read the same value.
+      whatsapp_business_manager_messaging_limit: limit,
+      messaging_limit_tier: limit,
       code_verification_status: 'VERIFIED',
       platform_type: 'CLOUD_API',
+      is_on_biz_app: this.#coexistence.isOnBizApp(phoneNumberId),
     }
 
     const requested = fields.length > 0 ? fields : Object.keys(available)
@@ -180,28 +225,41 @@ export class TechProviderService {
     return result
   }
 
-  /** Control API: change a number's quality rating and announce it. */
+  /**
+   * Control API: change a number's quality rating.
+   *
+   * Silently, because that is what Meta does now: `phone_number_quality_update`
+   * reports throughput and limit changes, and no current webhook carries a
+   * number's quality rating. It is read with `?fields=quality_rating`.
+   */
   setQuality(phoneNumberId: string, quality: QualityRating): { success: true } {
-    const { state, dispatcher } = this.#context
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId)
-
-    state.updatePhoneNumber(phoneNumberId, { qualityRating: quality })
-    dispatcher.dispatch(
-      phoneNumberId,
-      buildQualityUpdatePayload({
-        wabaId: phoneNumber.wabaId,
-        displayPhoneNumber: toDisplayPhoneNumber(phoneNumber.displayPhoneNumber),
-        quality,
-        currentLimit: phoneNumber.messagingTier ?? 'TIER_UNLIMITED',
-      }),
-    )
+    requirePhoneNumber(this.#context, phoneNumberId)
+    this.#context.state.updatePhoneNumber(phoneNumberId, { qualityRating: quality })
     return { success: true }
   }
 
-  /** Control API: set a number's messaging tier. */
+  /**
+   * Control API: set the messaging limit of the portfolio that owns this
+   * number, and announce it with `business_capability_update` on every WABA
+   * in that portfolio — every sibling number's limit changed with it.
+   */
   setTier(phoneNumberId: string, tier: MessagingTier): { success: true } {
+    const { state, clock, dispatcher } = this.#context
     requirePhoneNumber(this.#context, phoneNumberId)
-    this.#context.state.updatePhoneNumber(phoneNumberId, { messagingTier: tier })
+    const businessId = state.businessIdOf(phoneNumberId) ?? state.defaultBusinessId
+    state.setMessagingTier(businessId, tier)
+
+    const cap = TIER_CAPS[tier]
+    for (const waba of state.wabas().filter((w) => w.businessId === businessId)) {
+      dispatcher.dispatchToWaba(
+        waba.wabaId,
+        buildBusinessCapabilityPayload({
+          wabaId: waba.wabaId,
+          maxDailyConversationsPerBusiness: Number.isFinite(cap) ? cap : -1,
+          timeMs: clock.now(),
+        }),
+      )
+    }
     return { success: true }
   }
 

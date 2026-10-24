@@ -150,3 +150,18 @@ describe('TokenStore — reset', () => {
     expect(store.isValid(token, EPOCH)).toBe(false)
   })
 })
+
+describe('TokenStore — determinism', () => {
+  it('issues the same tokens on every run, and again after clear()', () => {
+    const run = () => {
+      const store = new TokenStore()
+      return [store.issue({ appId: 'APP', kind: 'short' }, 0), store.issue({ appId: 'APP', kind: 'permanent' }, 0)]
+    }
+    expect(run()).toEqual(run())
+
+    const store = new TokenStore()
+    const first = store.issue({ appId: 'APP', kind: 'short' }, 0)
+    store.clear()
+    expect(store.issue({ appId: 'APP', kind: 'short' }, 0)).toBe(first)
+  })
+})

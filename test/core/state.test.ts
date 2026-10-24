@@ -35,6 +35,19 @@ describe('MockState — default seed', () => {
 })
 
 describe('MockState — the app graph', () => {
+  it('refuses a WABA under a business portfolio it does not know', () => {
+    const state = new MockState({ appSecret: 's' })
+    expect(() =>
+      state.registerWaba({ wabaId: 'WABA_X', appId: state.defaultAppId, businessId: 'NOPE' }),
+    ).toThrow(/unknown business NOPE/)
+  })
+
+  it('puts a WABA registered without a portfolio in the default one', () => {
+    const state = new MockState({ appSecret: 's' })
+    state.registerWaba({ wabaId: 'WABA_X', appId: state.defaultAppId })
+    expect(state.waba('WABA_X')?.businessId).toBe(state.defaultBusinessId)
+  })
+
   it('resolves a phone number to the app secret that signs its webhooks', () => {
     // Spec §5.2 / §9.3: each webhook is signed with the secret of the app that
     // "delivers" it. Getting this wrong is invisible until a second app exists.
@@ -96,6 +109,8 @@ describe('MockState — sequence and reset', () => {
       to: '5215555000001',
       type: 'text',
       payload: { text: { body: 'hi' } },
+      recipientUserId: 'MX.1',
+      sentTo: 'phone',
       sentAt: 0,
     })
     expect(state.outbound()).toHaveLength(1)
@@ -123,6 +138,8 @@ describe('MockState — sequence and reset', () => {
       to: 't',
       type: 'text',
       payload: {},
+      recipientUserId: 'MX.1',
+      sentTo: 'phone',
       sentAt: 0,
     })
     expect(state.outbound()).toHaveLength(0)

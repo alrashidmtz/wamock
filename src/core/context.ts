@@ -1,10 +1,11 @@
 import type { WebhookDispatcher } from '../webhooks/dispatcher.js'
 import type { VirtualClock } from './clock.js'
-import type { Conversations } from './conversations.js'
+import type { Pricing } from './pricing.js'
 import type { MessagingLimits } from './limits.js'
 import type { ScenarioController } from './scenario.js'
 import type { MockState } from './state.js'
 import type { TokenStore } from './tokens.js'
+import type { Users } from './users.js'
 import type { ServiceWindows } from './window.js'
 
 /**
@@ -20,8 +21,9 @@ export interface MockContext {
   readonly state: MockState
   readonly scenario: ScenarioController
   readonly windows: ServiceWindows
-  readonly conversations: Conversations
+  readonly pricing: Pricing
   readonly tokens: TokenStore
+  readonly users: Users
   readonly limits: MessagingLimits
   readonly dispatcher: WebhookDispatcher
 }

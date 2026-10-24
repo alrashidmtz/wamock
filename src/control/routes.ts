@@ -2,8 +2,9 @@ import type { FastifyInstance } from 'fastify'
 import { z } from 'zod'
 
 import type { WamockEngine } from '../core/engine.js'
-import { TEMPLATE_STATUSES } from '../core/templates.js'
-import type { PhoneNumber } from '../core/types.js'
+import { TEMPLATE_CATEGORIES, TEMPLATE_STATUSES } from '../core/templates.js'
+import { MESSAGING_TIERS } from '../core/types.js'
+import type { Business, PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import type { InboundContent } from '../webhooks/payloads.js'
 
@@ -28,6 +29,24 @@ const InboundSchema = z
     from: z.string(),
     phone_number_id: z.string().optional(),
     name: z.string().optional(),
+    username: z.string().nullable().optional(),
+    // A Click-to-WhatsApp ad, with the fields Meta documents for `referral`.
+    referral: z
+      .object({
+        source_url: z.string().optional(),
+        source_id: z.string().optional(),
+        source_type: z.string().optional(),
+        body: z.string().optional(),
+        headline: z.string().optional(),
+        media_type: z.string().optional(),
+        image_url: z.string().optional(),
+        video_url: z.string().optional(),
+        thumbnail_url: z.string().optional(),
+        ctwa_clid: z.string().optional(),
+        welcome_message: z.object({ text: z.string() }).strict().optional(),
+      })
+      .strict()
+      .optional(),
     type: z.string().optional(),
     text: z.string().optional(),
     button_reply: z.object({ id: z.string(), title: z.string() }).optional(),
@@ -46,7 +65,56 @@ const AdvanceSchema = z.object({ ms: integer() }).strict()
 
 const TransitionSchema = z.object({ to: z.enum(TEMPLATE_STATUSES) }).strict()
 
-const SignupSchema = z.object({ subscribed: z.boolean().optional() }).strict()
+const RecategorizeSchema = z
+  .object({ to: z.enum(TEMPLATE_CATEGORIES), notice: z.boolean().optional() })
+  .strict()
+
+const AppContactSchema = z
+  .object({ phone: z.string(), full_name: z.string().optional(), first_name: z.string().optional() })
+  .strict()
+
+const SignupSchema = z
+  .object({
+    subscribed: z.boolean().optional(),
+    business_id: z.string().min(1).optional(),
+    // A number already on the WhatsApp Business app, with what the app holds.
+    coexistence: z.boolean().optional(),
+    share_history: z.boolean().optional(),
+    contacts: z.array(AppContactSchema).optional(),
+    history: z
+      .array(
+        z
+          .object({
+            phone: z.string(),
+            messages: z.array(
+              z
+                .object({ direction: z.enum(['in', 'out']), text: z.string(), ago_ms: z.number().nonnegative() })
+                .strict(),
+            ),
+          })
+          .strict(),
+      )
+      .optional(),
+  })
+  .strict()
+
+const AppSendSchema = z
+  .object({ phone_number_id: z.string(), to: z.string(), text: z.string() })
+  .strict()
+
+const AppContactChangeSchema = z
+  .object({
+    phone_number_id: z.string(),
+    phone: z.string(),
+    full_name: z.string().optional(),
+    first_name: z.string().optional(),
+    action: z.enum(['add', 'remove']).optional(),
+  })
+  .strict()
+
+const AppOffboardSchema = z
+  .object({ phone_number_id: z.string(), reconnect: z.boolean().optional() })
+  .strict()
 
 const TokenSchema = z
   .object({
@@ -55,22 +123,20 @@ const TokenSchema = z
   })
   .strict()
 
+const PreferenceSchema = z
+  .object({ from: z.string(), value: z.enum(['stop', 'resume']), phone_number_id: z.string().optional() })
+  .strict()
+
+const NumberChangeSchema = z
+  .object({ from: z.string(), to: z.string(), phone_number_id: z.string().optional() })
+  .strict()
+
 const QualitySchema = z
   .object({
     phone_number_id: z.string().optional(),
     quality_rating: z.enum(['RED', 'YELLOW', 'GREEN']),
   })
   .strict()
-
-export const MESSAGING_TIERS = [
-  'TIER_1',
-  'TIER_2',
-  'TIER_250',
-  'TIER_1K',
-  'TIER_10K',
-  'TIER_100K',
-  'TIER_UNLIMITED',
-] as const
 
 const TierSchema = z
   .object({ phone_number_id: z.string().optional(), tier: z.enum(MESSAGING_TIERS) })
@@ -111,6 +177,11 @@ const ScenarioSchema = z
  * in the README has to fit in one curl.
  */
 function toInboundContent(input: z.infer<typeof InboundSchema>): InboundContent {
+  const content = messageContent(input)
+  return input.referral !== undefined ? { ...content, referral: input.referral } : content
+}
+
+function messageContent(input: z.infer<typeof InboundSchema>): InboundContent {
   if (input.button_reply) {
     return {
       type: 'interactive',
@@ -175,6 +246,9 @@ function describeIssue(issue: z.core.$ZodIssue, received: unknown): string {
       return `Expected ${options}, received ${kindOf(received)}`
     }
     case 'too_small':
+      if (issue.origin === 'string') {
+        return `String must contain at least ${String(issue.minimum)} character(s)`
+      }
       return `Number must be greater than${issue.inclusive === true ? ' or equal to' : ''} ${String(issue.minimum)}`
     case 'unrecognized_keys':
       return `Unrecognized key(s) in object: ${issue.keys.map((key) => `'${key}'`).join(', ')}`
@@ -208,11 +282,13 @@ function kindOf(value: unknown): string {
 interface WabaView {
   wabaId: string
   appId: string
+  businessId: string
   subscribedApps: string[]
 }
 
 export interface StateSnapshot {
   now: number
+  businesses: Business[]
   phoneNumbers: PhoneNumber[]
   wabas: WabaView[]
   outboundCount: number
@@ -236,10 +312,12 @@ export function buildStateSnapshot(engine: WamockEngine): StateSnapshot {
     now: engine.clock.now(),
     // Deliberately no app secrets: this endpoint is meant to be curl-ed and
     // pasted into bug reports.
+    businesses: engine.state.businesses(),
     phoneNumbers: engine.state.phoneNumbers(),
     wabas: engine.state.wabas().map((waba) => ({
       wabaId: waba.wabaId,
       appId: waba.appId,
+      businessId: waba.businessId,
       subscribedApps: [...waba.subscribedApps],
     })),
     outboundCount: engine.state.outbound().length,
@@ -265,6 +343,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
         ? { phoneNumberId: parsed.data.phone_number_id }
         : {}),
       ...(parsed.data.name !== undefined ? { contactName: parsed.data.name } : {}),
+      ...(parsed.data.username !== undefined ? { username: parsed.data.username } : {}),
       message: toInboundContent(parsed.data),
     })
 
@@ -303,6 +382,33 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
           request.params.name,
           request.params.language,
           parsed.data.to,
+        ),
+      )
+    },
+  )
+
+  /**
+   * Play Meta's automated recategorization: a notice now and the change in 24
+   * hours, or the change at once with `notice: false`.
+   */
+  app.post<{ Params: { name: string; language: string }; Querystring: { waba_id?: string } }>(
+    '/__mock/templates/:name/:language/recategorize',
+    async (request, reply) => {
+      const parsed = RecategorizeSchema.safeParse(request.body)
+      if (!parsed.success) {
+        throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+          details: describeIssues(parsed.error, request.body),
+        })
+      }
+      return reply.send(
+        engine.recategorizeTemplate(
+          request.query.waba_id ?? engine.state.defaultWabaId,
+          request.params.name,
+          request.params.language,
+          {
+            to: parsed.data.to,
+            ...(parsed.data.notice !== undefined ? { notice: parsed.data.notice } : {}),
+          },
         ),
       )
     },
@@ -349,12 +455,71 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
   app.post('/__mock/embedded-signup', async (request, reply) => {
     const parsed = SignupSchema.safeParse(request.body ?? {})
     if (!parsed.success) {
-      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Invalid signup options' })
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: describeIssues(parsed.error, request.body ?? {}),
+      })
+    }
+    const { data } = parsed
+    return reply.send(
+      engine.createSignup({
+        ...(data.subscribed !== undefined ? { subscribed: data.subscribed } : {}),
+        ...(data.business_id !== undefined ? { businessId: data.business_id } : {}),
+        ...(data.coexistence !== undefined ? { coexistence: data.coexistence } : {}),
+        ...(data.share_history !== undefined ? { shareHistory: data.share_history } : {}),
+        ...(data.contacts !== undefined
+          ? {
+              contacts: data.contacts.map((contact) => ({
+                phone: contact.phone,
+                ...(contact.full_name !== undefined ? { full_name: contact.full_name } : {}),
+                ...(contact.first_name !== undefined ? { first_name: contact.first_name } : {}),
+              })),
+            }
+          : {}),
+        ...(data.history !== undefined ? { history: data.history } : {}),
+      }),
+    )
+  })
+
+  /** The business sends a message from the WhatsApp Business app: an echo, nothing billed. */
+  app.post('/__mock/app/send', async (request, reply) => {
+    const parsed = AppSendSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: describeIssues(parsed.error, request.body) })
     }
     return reply.send(
-      engine.createSignup(
-        parsed.data.subscribed !== undefined ? { subscribed: parsed.data.subscribed } : {},
-      ),
+      engine.businessAppSend({ phoneNumberId: parsed.data.phone_number_id, to: parsed.data.to, text: parsed.data.text }),
+    )
+  })
+
+  /** The business adds, edits or removes a contact in the app: `smb_app_state_sync`. */
+  app.post('/__mock/app/contacts', async (request, reply) => {
+    const parsed = AppContactChangeSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: describeIssues(parsed.error, request.body) })
+    }
+    const { data } = parsed
+    return reply.send(
+      engine.businessAppContact({
+        phoneNumberId: data.phone_number_id,
+        phone: data.phone,
+        ...(data.full_name !== undefined ? { full_name: data.full_name } : {}),
+        ...(data.first_name !== undefined ? { first_name: data.first_name } : {}),
+        ...(data.action !== undefined ? { action: data.action } : {}),
+      }),
+    )
+  })
+
+  /** The business changes device: offboarded, then reconnected unless `reconnect: false`. */
+  app.post('/__mock/app/offboard', async (request, reply) => {
+    const parsed = AppOffboardSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: describeIssues(parsed.error, request.body) })
+    }
+    return reply.send(
+      engine.businessAppOffboard({
+        phoneNumberId: parsed.data.phone_number_id,
+        ...(parsed.data.reconnect !== undefined ? { reconnect: parsed.data.reconnect } : {}),
+      }),
     )
   })
 
@@ -370,6 +535,44 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
       engine.issueToken({
         ...(parsed.data.kind !== undefined ? { kind: parsed.data.kind } : {}),
         ...(parsed.data.scopes !== undefined ? { scopes: parsed.data.scopes } : {}),
+      }),
+    )
+  })
+
+  /** A user stops or resumes marketing messages, announced as `user_preferences`. */
+  app.post('/__mock/users/preferences', async (request, reply) => {
+    const parsed = PreferenceSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: describeIssues(parsed.error, request.body),
+      })
+    }
+    return reply.send(
+      engine.setUserPreference({
+        from: parsed.data.from,
+        value: parsed.data.value,
+        ...(parsed.data.phone_number_id !== undefined
+          ? { phoneNumberId: parsed.data.phone_number_id }
+          : {}),
+      }),
+    )
+  })
+
+  /** A user changes their phone number: a new BSUID, announced as a system message. */
+  app.post('/__mock/users/change-number', async (request, reply) => {
+    const parsed = NumberChangeSchema.safeParse(request.body)
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
+        details: describeIssues(parsed.error, request.body),
+      })
+    }
+    return reply.send(
+      engine.changeUserNumber({
+        from: parsed.data.from,
+        to: parsed.data.to,
+        ...(parsed.data.phone_number_id !== undefined
+          ? { phoneNumberId: parsed.data.phone_number_id }
+          : {}),
       }),
     )
   })

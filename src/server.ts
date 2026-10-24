@@ -12,9 +12,10 @@ import { ERROR_CODES, GraphError } from './errors/graph-error.js'
  */
 
 /**
- * Graph version segment. Real integrations pin anything from v17 to v23, and a
- * mock that only answers on one of them fails for reasons that have nothing to
- * do with the code under test (spec §5.1).
+ * Graph version segment. Real integrations pin anything from v17 to v26 (the
+ * latest, released 2026-07-29), expired versions included, and a mock that only
+ * answers on one of them fails for reasons that have nothing to do with the
+ * code under test (spec §5.1).
  */
 const VERSION_PATTERN = /^v\d+\.\d+$/
 
@@ -119,12 +120,11 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    * Hand over the webhooks this control call triggered before answering it.
    *
    * The library helpers have always done this (`createWamock`'s `flush`), and
-   * the HTTP door did not — so `POST /__mock/quality` changed the rating,
-   * returned 200, and delivered nothing until something moved the clock. The
-   * README promises it "announces it"; this is what makes that true (#4).
+   * the HTTP door did not — so a control call changed state, returned 200, and
+   * delivered the webhook it caused only once something moved the clock (#4).
    *
-   * A hook rather than a line per route: it covers inbound, statuses, quality,
-   * template transitions and `time/advance` at once, and any control endpoint
+   * A hook rather than a line per route: it covers inbound, statuses, limit
+   * changes, template transitions and `time/advance` at once, and any control endpoint
    * added later is born correct.
    *
    * Scoped to `/__mock/` because Meta answers a send immediately and does not
@@ -170,7 +170,7 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       }
       const body = (request.body ?? {}) as Record<string, unknown>
       return reply.send(
-        engine.sendMessage(request.params.phoneNumberId, body, bearerToken(request.headers)),
+        engine.postMessages(request.params.phoneNumberId, body, bearerToken(request.headers)),
       )
     },
   )
@@ -224,6 +224,17 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   )
 
   // --- media (spec §5.5) ---------------------------------------------------
+
+  // Coexistence: request the Business app's contacts or chat history, once
+  // each, within 24 hours of onboarding.
+  app.post<{ Params: { version: string; phoneNumberId: string } }>(
+    '/:version/:phoneNumberId/smb_app_data',
+    async (request, reply) => {
+      if (!VERSION_PATTERN.test(request.params.version)) return reply.callNotFound()
+      const body = (request.body ?? {}) as Record<string, unknown>
+      return reply.send(engine.syncBusinessAppData(request.params.phoneNumberId, body))
+    },
+  )
 
   app.post<{ Params: { version: string; phoneNumberId: string } }>(
     '/:version/:phoneNumberId/media',

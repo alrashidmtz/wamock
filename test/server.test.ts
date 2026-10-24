@@ -233,6 +233,7 @@ describe('GET /__mock/messages and /__mock/state', () => {
       {
         wabaId: engine.state.defaultWabaId,
         appId: engine.state.defaultAppId,
+        businessId: engine.state.defaultBusinessId,
         subscribedApps: [engine.state.defaultAppId],
       },
     ])
@@ -246,7 +247,7 @@ describe('GET /__mock/messages and /__mock/state', () => {
     await openWindow()
     await post(`/v19.0/${engine.state.defaultPhoneNumberId}/messages`, textBody)
     await post('/__mock/quality', { quality_rating: 'RED' })
-    await post('/__mock/tier', { tier: 'TIER_1K' })
+    await post('/__mock/tier', { tier: 'TIER_2K' })
 
     const snapshot = buildStateSnapshot(engine)
 
