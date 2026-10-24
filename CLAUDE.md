@@ -44,7 +44,8 @@ run it (after `build`) whenever a change touches what ships.
   unpauses, recategorizations) must be tracked and cancelled in that service's
   `clear()`, which `engine.reset()` calls.
 - **`engine.flush()`** is the one way a front door delivers what it triggered:
-  `advance(0)` + bounded settle (`settleWithin`), repeated while the
+  `advance(0)` + settle, under ONE budget for the whole call (a per-round
+  budget let a stuck receiver hold a helper for a multiple of it), repeated while the
   deliverer makes progress (an attempt settled, or `reset()` started a new
   generation) when the clock is frozen (capped at 100 rounds, so a receiver
   that answers every webhook with another throws instead of hanging), a single

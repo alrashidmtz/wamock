@@ -85,11 +85,9 @@ describe('close() stops everything it started', () => {
 
     await m.inbound({ from: '5215555000001', text: 'hola' })
 
-    const started = Date.now()
+    // Unbounded, close() would never return and the test would time out.
     await m.close()
-
-    expect(Date.now() - started).toBeLessThan(3_000)
-  })
+  }, 10_000)
 
   it('still waits for a receiver that finishes promptly', async () => {
     // The bound must not turn into "give up immediately" — the whole point of
@@ -145,10 +143,13 @@ describe('replying from inside a webhook handler', () => {
     // the handler. Each reply waited for the drain the other was holding —
     // mutual re-entrancy — so the call burned the whole settle timeout doing
     // nothing. A nested flush now defers to the outer one.
+    // A settle budget far past the test's timeout: a call that waited on the
+    // other copy's drain would sit it out and time the test out, every time.
     let mock: Wamock
     mock = await createWamock({
       appSecret: 's',
       start: EPOCH,
+      settleTimeoutMs: 60_000,
       onWebhook: async (delivery) => {
         const value = JSON.parse(delivery.body).entry[0].changes[0].value
         if (!value.messages) return
@@ -157,13 +158,11 @@ describe('replying from inside a webhook handler', () => {
     })
     mock.scenario({ duplicateWebhooks: true })
 
-    const started = Date.now()
     await mock.inbound({ from: '5215555000001', text: 'hola' })
 
-    expect(Date.now() - started).toBeLessThan(2_000)
     expect(mock.messages().length).toBeGreaterThan(0)
     await mock.close()
-  })
+  }, 15_000)
 
   it('still delivers the statuses for a reply sent from the handler', async () => {
     const statuses: string[] = []

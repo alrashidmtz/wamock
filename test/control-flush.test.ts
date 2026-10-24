@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { WamockEngine } from '../src/core/engine.js'
 import { createWamock } from '../src/lib.js'
 import type { Wamock } from '../src/lib.js'
+import { createServer } from '../src/server.js'
 
 /**
  * The control API delivers what it triggers, before it answers (#4).
@@ -18,6 +19,16 @@ import type { Wamock } from '../src/lib.js'
  */
 
 const EPOCH = 1_750_000_000_000
+
+/**
+ * For tests that a call never waits on its own delivery: a settle budget far
+ * past the test's own timeout. A call that waited on itself would sit out
+ * the whole minute, so the test times out and fails every time; one that
+ * does not finishes in milliseconds. No wall-clock threshold to miss on a
+ * loaded CI runner.
+ */
+const SELF_WAIT_MS = 60_000
+const SELF_WAIT_TEST_MS = 15_000
 const CUSTOMER = '5215555000001'
 
 interface Change {
@@ -248,6 +259,8 @@ describe('flush rounds', () => {
     engine.setTier(engine.state.defaultPhoneNumberId, 'TIER_2K')
 
     await expect(engine.flush()).rejects.toThrow(/exceeded 100 rounds/)
+    // One webhook a round: the cap is 100 rounds, not 101.
+    expect(engine.deliverer.deliveredCount()).toBe(100)
   })
 
   it('takes a single round on a live clock, whose tick fires the rest', async () => {
@@ -270,20 +283,115 @@ describe('flush rounds', () => {
       onWebhook: () => new Promise(() => {}),
     })
 
+    // What reaches the engine is the contract here; that a flush keeps to the
+    // budget it is given is pinned with fake timers below. Timing the request
+    // measured runner load.
+    const flush = vi.spyOn(stuck.engine, 'flush')
     try {
-      const began = Date.now()
       const res = await fetch(`${stuck.baseUrl}/__mock/tier`, {
         method: 'POST',
         body: JSON.stringify({ tier: 'TIER_2K' }),
       })
-      const waited = Date.now() - began
 
       expect(res.status).toBe(200)
-      // Generous by design: this must fail because the default took over, not
-      // because a loaded machine took an extra moment.
-      expect(waited).toBeLessThan(2_000)
+      expect(flush).toHaveBeenCalled()
+      for (const [timeoutMs] of flush.mock.calls) expect(timeoutMs).toBe(250)
+
+      // GETs flush in another hook, before answering: the budget must reach
+      // that one too.
+      flush.mockClear()
+      expect((await fetch(`${stuck.baseUrl}/__mock/state`)).status).toBe(200)
+      expect(flush).toHaveBeenCalled()
+      for (const [timeoutMs] of flush.mock.calls) expect(timeoutMs).toBe(250)
     } finally {
+      flush.mockRestore()
       await stuck.close()
+    }
+  })
+
+  // Left to Stryker in startBudget: `unref?.()`, `if (timer)` and the
+  // `cancel()` in flush's finally. The timer is unref'd and always set, and an
+  // uncleared one only resolves a promise nobody awaits any more.
+  it('keeps a flush to exactly the budget it is given, however stuck the receiver', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH, transport: () => new Promise(() => {}) })
+      engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
+      let done = false
+      const flushing = engine.flush(250).then(() => {
+        done = true
+      })
+      await vi.advanceTimersByTimeAsync(249)
+      expect(done).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await flushing
+      expect(done).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('answers a control GET within one budget, not one per hook', async () => {
+    // A read flushes before it answers; flushing again after it did doubled
+    // the wait a stuck receiver could impose.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const engine = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH, transport: () => new Promise(() => {}) })
+    const app = createServer(engine, { settleTimeoutMs: 250 })
+    try {
+      await app.ready()
+      engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
+      let answered = false
+      const reading = app.inject({ method: 'GET', url: '/__mock/state' }).then((res) => {
+        answered = true
+        return res
+      })
+      await vi.advanceTimersByTimeAsync(249)
+      expect(answered).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect((await reading).statusCode).toBe(200)
+      expect(answered).toBe(true)
+
+      // A path that does not exist runs the hooks again on its way to the
+      // 404: still one budget.
+      engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'otra' } } })
+      let missed = false
+      const missing = app.inject({ method: 'GET', url: '/__mock/typo' }).then((res) => {
+        missed = true
+        return res
+      })
+      await vi.advanceTimersByTimeAsync(249)
+      expect(missed).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(missed).toBe(true)
+      expect((await missing).statusCode).toBe(404)
+    } finally {
+      vi.useRealTimers()
+      await app.close()
+    }
+  })
+
+  it('ends at the budget even when each stuck delivery sets off another', async () => {
+    // A receiver that answers every webhook with a new message and then hangs:
+    // every round starts more work, so only the budget can end the call, and
+    // it must end it cleanly rather than spin into the 100-round error.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const engine: WamockEngine = new WamockEngine({
+        appSecret: 's',
+        mode: 'frozen',
+        start: EPOCH,
+        transport: async () => {
+          await Promise.resolve()
+          engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'again' } } })
+          await new Promise(() => {})
+        },
+      })
+      engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
+      const flushing = engine.flush(250)
+      await vi.advanceTimersByTimeAsync(250)
+      await expect(flushing).resolves.toBeUndefined()
+    } finally {
+      vi.useRealTimers()
     }
   })
 
@@ -385,7 +493,7 @@ describe('time.advance from inside a handler', () => {
     const mock = await createWamock({
       appSecret: 's',
       start: 1_750_000_000_000,
-      settleTimeoutMs: 2000,
+      settleTimeoutMs: SELF_WAIT_MS,
       onWebhook: async (d) => {
         const field = d.payload.entry[0]!.changes[0]!.field
         seen.push(field)
@@ -399,13 +507,11 @@ describe('time.advance from inside a handler', () => {
       },
     })
     try {
-      const started = performance.now()
       await mock.inbound({ from: '5215555000001', text: 'hola' })
-      expect(performance.now() - started).toBeLessThan(1000)
     } finally {
       await mock.close()
     }
-  })
+  }, SELF_WAIT_TEST_MS)
 })
 
 describe('a handler never waits for its own delivery', () => {
@@ -415,7 +521,7 @@ describe('a handler never waits for its own delivery', () => {
     const mock = await createWamock({
       appSecret: 's',
       start: 1_750_000_000_000,
-      settleTimeoutMs: 2000,
+      settleTimeoutMs: SELF_WAIT_MS,
       onWebhook: async (d) => {
         const value = JSON.parse(d.body).entry[0].changes[0].value
         if (value.statuses?.[0]?.status !== 'sent') return
@@ -427,14 +533,12 @@ describe('a handler never waits for its own delivery', () => {
     try {
       await mock.inbound({ from: '5215555000001', text: 'hola' })
       await mock.send({ to: '5215555000001', text: 'respuesta' })
-      const started = performance.now()
       await mock.time.advance(50)
-      expect(performance.now() - started).toBeLessThan(1000)
       expect(handled).toBe(true)
     } finally {
       await mock.close()
     }
-  })
+  }, SELF_WAIT_TEST_MS)
 
   it('still waits for other deliveries, even from work a finished delivery left behind', async () => {
     const { createWamock } = await import('../src/lib.js')
@@ -479,7 +583,7 @@ describe('waits only point forward', () => {
     const mock = await createWamock({
       appSecret: 's',
       start: 1_750_000_000_000,
-      settleTimeoutMs: 2000,
+      settleTimeoutMs: SELF_WAIT_MS,
       onWebhook: async (d) => {
         if (!JSON.parse(d.body).entry[0].changes[0].value.messages) return
         await new Promise((resolve) => setTimeout(resolve, 0))
@@ -489,42 +593,39 @@ describe('waits only point forward', () => {
     })
     try {
       await mock.scenario({ duplicateWebhooks: true })
-      const started = performance.now()
       await mock.inbound({ from: '5215555000001', text: 'hola' })
-      expect(performance.now() - started).toBeLessThan(1000)
       expect(done).toBe(2)
     } finally {
       await mock.close()
     }
-  })
+  }, SELF_WAIT_TEST_MS)
 
   it('answers a receiver that calls the control API mid-delivery without waiting on that delivery', async () => {
     const { WamockEngine } = await import('../src/core/engine.js')
     const { createServer } = await import('../src/server.js')
     let app: Awaited<ReturnType<typeof createServer>> | undefined
-    let answeredIn = Number.POSITIVE_INFINITY
+    let answered = false
     const engine = new WamockEngine({
       appSecret: 's',
       mode: 'frozen',
       start: 1_750_000_000_000,
       transport: async () => {
-        const started = performance.now()
         await app!.inject({ method: 'POST', url: '/__mock/time/advance', payload: '{"ms":1}' })
-        answeredIn = performance.now() - started
+        answered = true
       },
     })
-    app = createServer(engine, { settleTimeoutMs: 2000 })
+    app = createServer(engine, { settleTimeoutMs: SELF_WAIT_MS })
     await app.ready()
     try {
       engine.simulateInbound({ from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } })
       engine.clock.advance(0)
       await engine.settle()
-      expect(answeredIn).toBeLessThan(1000)
+      expect(answered).toBe(true)
       expect(engine.deliverer.log().map((r) => r.ok)).toEqual([true])
     } finally {
       await app.close()
     }
-  })
+  }, SELF_WAIT_TEST_MS)
 })
 
 describe('a control request and the deliveries it set off', () => {
@@ -599,11 +700,12 @@ describe('a control request and the deliveries it set off', () => {
 })
 
 describe('a receiver that answers every message with another', () => {
-  it('fails as fast as before: waits from inside deliveries cost nothing', async () => {
+  it('fails with the clock’s iteration cap instead of hanging', async () => {
     // Each handler calls mock.inbound, whose message the clock fires inside
-    // the same drain, until the clock's own iteration cap stops it. Waiting
-    // must not scan every delivery still in flight on each of those calls:
-    // done that way, this took 45s to over two minutes instead of about two.
+    // the same drain, until the clock's own iteration cap stops it. That
+    // each of those calls waits without scanning every delivery in flight
+    // (once 45s or more instead of about two) is pinned by counting scans in
+    // delivery.test.ts: a timer here failed on loaded CI runners.
     const { createWamock } = await import('../src/lib.js')
     const mock = await createWamock({
       appSecret: 's',
@@ -614,9 +716,7 @@ describe('a receiver that answers every message with another', () => {
       },
     })
     try {
-      const started = performance.now()
       await expect(mock.inbound({ from: '5215555000001', text: 'start' })).rejects.toThrow(/timer iterations/)
-      expect(performance.now() - started).toBeLessThan(5_000)
     } finally {
       await mock.close()
     }

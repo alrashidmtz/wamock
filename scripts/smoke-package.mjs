@@ -125,15 +125,14 @@ await mock.close()
 if (globalThis.fetch === patched) { console.error('close() did not restore the global fetch'); process.exit(1) }
 
 // 2. A receiver that never resolves must not freeze anything. This is the
-//    exact regression 0.2.1 shipped, and the reason this file exists.
-const t = Date.now()
+//    exact regression 0.2.1 shipped, and the reason this file exists. Frozen,
+//    these calls never return and the watchdog above ends the run.
 const stuck = await createWamock({
   appSecret: 's', start: 1e12, settleTimeoutMs: 200,
   onWebhook: () => new Promise(() => {}),
 })
 await stuck.inbound({ from: '5216691112233', text: 'hola' })
 await stuck.close()
-if (Date.now() - t > 10000) { console.error('a stuck receiver froze the packaged build'); process.exit(1) }
 
 clearTimeout(bomb)
 console.log('packaged build works: full lifecycle, interceptor, and bounded waits')

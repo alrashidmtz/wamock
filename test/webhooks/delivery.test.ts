@@ -443,11 +443,35 @@ describe('WebhookDeliverer — retries, as Meta retries', () => {
     expect(calls).toBe(1)
   })
 
+  it('answers hasInFlight from where nothing has started yet without scanning what is in flight', async () => {
+    // The call every delivery makes back into the mock. Scanning here made a
+    // receiver that answers every message with another take 45s instead of
+    // about two; counting the scans pins it without a timer.
+    const clock = new VirtualClock({ mode: 'frozen', start: EPOCH })
+    const pending: Array<() => void> = []
+    const deliverer = new WebhookDeliverer({ clock, transport: () => new Promise<void>((resolve) => pending.push(resolve)) })
+    for (let i = 0; i < 50; i++) deliverer.enqueue(samplePayload(), { appSecret: SECRET })
+    clock.advance(0)
+    expect(deliverer.hasInFlight(0)).toBe(true)
+
+    // Every way to walk a Map, so a scan written as for-of or entries() is
+    // caught as surely as one through keys().
+    const walks = (['keys', 'values', 'entries', 'forEach', Symbol.iterator] as const).map((method) =>
+      vi.spyOn(Map.prototype, method as 'keys'),
+    )
+    try {
+      expect(deliverer.hasInFlight(deliverer.nextAttempt())).toBe(false)
+      for (const walk of walks) expect(walk).not.toHaveBeenCalled()
+    } finally {
+      for (const walk of walks) walk.mockRestore()
+    }
+    for (const release of pending) release()
+    await deliverer.settle()
+  })
+
   // Mutants left alive on purpose: `isCurrent`'s `cause === 'ended'` shortcut
   // only skips a look whose answer cannot change `ended`; `progressSince` and
-  // the generation counter only need to change, not in which direction; and
-  // `hasInFlight`'s early return is the fast path control-flush.test.ts pins
-  // by timing.
+  // the generation counter only need to change, not in which direction.
   it('keeps a moved attempt moved when the callback moves back, and still delivers it there', async () => {
     // The first look decides: a callback changed and changed back is a move,
     // so this attempt is cancelled and the webhook goes out again, rerouted,

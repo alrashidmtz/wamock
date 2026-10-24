@@ -200,8 +200,19 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
   app.addHook('onRequest', async (request) => {
     if (request.url.startsWith('/__mock/')) startedAt.set(request, engine.deliverer.nextAttempt())
   })
+  // One flush, so one budget, per request: a hook can run twice for the same
+  // request (an unknown /__mock/ path runs `preHandler` again on its way to
+  // the 404), and a second flush would spend a second budget.
+  const flushed = new WeakSet<object>()
+  const flushOnce = async (request: FastifyRequest): Promise<void> => {
+    if (flushed.has(request.raw)) return
+    flushed.add(request.raw)
+    await engine.flush(settleTimeoutMs, startedAt.get(request))
+  }
+  // Writes only: a read flushed in `preHandler` already, and its handler sets
+  // nothing off.
   app.addHook('onSend', async (request, _reply, payload) => {
-    if (request.url.startsWith('/__mock/')) await engine.flush(settleTimeoutMs, startedAt.get(request))
+    if (request.method !== 'GET' && request.url.startsWith('/__mock/')) await flushOnce(request)
     return payload
   })
 
@@ -220,9 +231,7 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
    * which is the opposite of what a reset is for.
    */
   app.addHook('preHandler', async (request) => {
-    if (request.method === 'GET' && request.url.startsWith('/__mock/')) {
-      await engine.flush(settleTimeoutMs, startedAt.get(request))
-    }
+    if (request.method === 'GET' && request.url.startsWith('/__mock/')) await flushOnce(request)
   })
 
   registerControlRoutes(app, engine)

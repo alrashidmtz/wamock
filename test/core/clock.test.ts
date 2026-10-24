@@ -128,14 +128,23 @@ describe('VirtualClock — live mode', () => {
     expect(clock.now()).toBeGreaterThanOrEqual(before + 60_000)
   })
 
-  it('fires due timers on its own tick, without an explicit advance()', async () => {
-    const clock = new VirtualClock({ mode: 'live', tickMs: 5 })
-    const fn = vi.fn()
-    clock.at(clock.now() + 10, fn)
-    clock.start()
-
-    await vi.waitFor(() => expect(fn).toHaveBeenCalledTimes(1), { timeout: 500 })
-    clock.stop()
+  it('fires due timers on its own tick, without an explicit advance()', () => {
+    // Fake timers move the wall clock and the tick together, so this checks
+    // the tick itself, not how promptly a loaded runner schedules it.
+    vi.useFakeTimers()
+    try {
+      const clock = new VirtualClock({ mode: 'live', tickMs: 5 })
+      const fn = vi.fn()
+      clock.at(clock.now() + 10, fn)
+      clock.start()
+      vi.advanceTimersByTime(9)
+      expect(fn).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(6)
+      expect(fn).toHaveBeenCalledTimes(1)
+      clock.stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('stop() keeps the process from being held open by the tick', () => {

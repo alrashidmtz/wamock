@@ -188,6 +188,12 @@ per-country grouping, which would need a phone number library.
   a duplicate of the same webhook, or over HTTP — no longer waits for itself
   until the timeout, and a long queue of earlier deliveries no longer counts
   against a later request's 100-round limit.
+- **`settleTimeoutMs` bounds the whole call.** Each round of a flush used to
+  get the full budget, so a receiver that never answered held a helper or
+  control request for at least twice `settleTimeoutMs`, and one that hung on
+  every reply for up to 100 times it. A control `GET` flushed twice (before
+  answering and again after), and so did a mistyped `/__mock/` path on its
+  way to the 404, each spending a second budget.
 - **`engine.reset()` starts webhook delivery afresh.** A delivery still in
   flight when the mock was reset no longer lands in the new log, and the HTTP
   transport forgets which URLs it verified, so the next test runs the

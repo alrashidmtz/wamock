@@ -76,6 +76,29 @@ export const DEFAULT_SETTLE_TIMEOUT_MS = 5_000
  */
 const MAX_FLUSH_ROUNDS = 100
 
+/**
+ * A wait that expires after `timeoutMs` of real time. The timer is unref'd so
+ * it can never be the reason a process stays alive.
+ */
+function startBudget(timeoutMs: number): { expired: Promise<void>; isExpired(): boolean; cancel(): void } {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let expired = false
+  const expiry = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      expired = true
+      resolve()
+    }, timeoutMs)
+    timer.unref?.()
+  })
+  return {
+    expired: expiry,
+    isExpired: () => expired,
+    cancel: () => {
+      if (timer) clearTimeout(timer)
+    },
+  }
+}
+
 export class WamockEngine {
   readonly clock: VirtualClock
   readonly state: MockState
@@ -169,16 +192,11 @@ export class WamockEngine {
    * unref'd so this can never be the reason a process stays alive.
    */
   async settleWithin(timeoutMs: number = DEFAULT_SETTLE_TIMEOUT_MS, from = 0): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const expiry = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs)
-      timer.unref?.()
-    })
-
+    const budget = startBudget(timeoutMs)
     try {
-      await Promise.race([this.settle(from), expiry])
+      await Promise.race([this.settle(from), budget.expired])
     } finally {
-      if (timer) clearTimeout(timer)
+      budget.cancel()
     }
   }
 
@@ -216,6 +234,10 @@ export class WamockEngine {
     // helper nest flushes without bound: measured, it ran out of memory.
     if (this.#flushing) return this.settleWithin(timeoutMs, since)
     this.#flushing = true
+    // One budget for the whole flush, not one per round: a round that only
+    // saw a stuck delivery start would otherwise buy another full wait, and a
+    // receiver hanging on every reply could hold the call for 100 of them.
+    const budget = startBudget(timeoutMs)
     try {
       const maxRounds = this.clock.frozen ? MAX_FLUSH_ROUNDS : 1
       for (let round = 0; round < maxRounds; round++) {
@@ -224,7 +246,8 @@ export class WamockEngine {
         // made more due now; nothing else is this call's to wait for.
         const before = this.deliverer.progressSince(since)
         this.clock.advance(0)
-        await this.settleWithin(timeoutMs, since)
+        await Promise.race([this.deliverer.settle(since), budget.expired])
+        if (budget.isExpired()) return
         if (this.deliverer.progressSince(since) === before) return
       }
       if (this.clock.frozen) {
@@ -233,6 +256,7 @@ export class WamockEngine {
         )
       }
     } finally {
+      budget.cancel()
       this.#flushing = false
     }
   }
