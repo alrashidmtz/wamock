@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import type { WamockEngine } from '../core/engine.js'
 import { TEMPLATE_CATEGORIES, TEMPLATE_STATUSES } from '../core/templates.js'
-import { MESSAGING_TIERS } from '../core/types.js'
+import { CONNECTION_STATUSES, MESSAGING_TIERS } from '../core/types.js'
 import type { Business, PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import { LAST_INSTANT_MS } from '../core/clock.js'
@@ -187,6 +187,12 @@ const QualitySchema = z
     quality_rating: z.enum(['RED', 'YELLOW', 'GREEN', 'UNKNOWN']),
   })
   .strict()
+
+// Meta changing a number's status.
+const PhoneStatusSchema = z.object({ phone_number_id: z.string().min(1).optional(), status: z.enum(CONNECTION_STATUSES) }).strict()
+
+// Meta upgrading a number to higher throughput.
+const ThroughputUpgradeSchema = z.object({ phone_number_id: z.string().min(1).optional() }).strict()
 
 // Meta deeming a portfolio eligible for authentication-international rates.
 // Times are unix seconds, as Meta's webhooks and fields carry them.
@@ -686,6 +692,14 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     )
   })
 
+  app.post('/__mock/phone-status', async (request, reply) => {
+    const parsed = PhoneStatusSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: describeIssues(parsed.error, request.body ?? {}) })
+    }
+    return reply.send(engine.setPhoneStatus(parsed.data.phone_number_id ?? engine.state.defaultPhoneNumberId, parsed.data.status))
+  })
+
   app.post('/__mock/tier', async (request, reply) => {
     const parsed = TierSchema.safeParse(request.body)
     if (!parsed.success) {
@@ -706,6 +720,14 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
   )
 
   app.get('/__mock/state', async (_request, reply) => reply.send(buildStateSnapshot(engine)))
+
+  app.post('/__mock/throughput-upgrade', async (request, reply) => {
+    const parsed = ThroughputUpgradeSchema.safeParse(request.body ?? {})
+    if (!parsed.success) {
+      throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: describeIssues(parsed.error, request.body ?? {}) })
+    }
+    return reply.send(engine.upgradeThroughput(parsed.data.phone_number_id ?? engine.state.defaultPhoneNumberId))
+  })
 
   app.post('/__mock/auth-international', async (request, reply) => {
     const parsed = AuthInternationalSchema.safeParse(request.body ?? {})

@@ -141,6 +141,16 @@ const CATALOG: Record<string, CatalogEntry> = {
     details:
       'The variable parameter values included in the request are not using the format specified in the template.',
   },
+  MAINTENANCE_MODE: {
+    code: 131057,
+    httpStatus: 400,
+    retriable: true,
+    message: '(#131057) Business Account is in maintenance mode',
+    type: 'OAuthException',
+    subcode: undefined,
+    details:
+      'The WhatsApp Business account is in maintenance mode. One reason for this could be that the account is undergoing a throughput upgrade.',
+  },
   NOT_VERIFIED: {
     code: 133006,
     httpStatus: 400,

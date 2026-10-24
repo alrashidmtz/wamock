@@ -42,12 +42,35 @@ export interface Waba {
   callbackOverride?: { url: string; verifyToken: string }
 }
 
-/** Meta's quality ratings, worst to best. */
 /**
- * Meta's quality ratings. `UNKNOWN` is a number not rated yet, as the
- * phone-number reference spells it.
+ * Meta's quality ratings. Meta contradicts itself on a number not rated yet:
+ * the phone-number reference's enum says `NA`, its "Get all phone numbers"
+ * example response shows `UNKNOWN`. wamock answers `UNKNOWN`, the spelling of
+ * an actual response.
  */
 export type QualityRating = 'RED' | 'YELLOW' | 'GREEN' | 'UNKNOWN'
+
+/**
+ * A number's `status`. Inferred: Meta's phone-number reference gives this enum
+ * (WhatsAppBusinessAccountToNumberStatus) to the `connection_status` of a
+ * status update, and lists no values for the `status` a read returns; wamock
+ * serves the same values there. Meta does not document what each one does to
+ * sends, so wamock only reports it.
+ */
+export const CONNECTION_STATUSES = [
+  'CONNECTED',
+  'DISCONNECTED',
+  'PENDING',
+  'FLAGGED',
+  'RESTRICTED',
+  'RATE_LIMITED',
+  'MESSAGING_LIMIT_TIER_0',
+  'MESSAGING_LIMIT_TIER_1',
+  'MESSAGING_LIMIT_TIER_2',
+  'MESSAGING_LIMIT_TIER_3',
+  'MESSAGING_LIMIT_TIER_4',
+] as const
+export type ConnectionStatus = (typeof CONNECTION_STATUSES)[number]
 
 /**
  * Messaging limits, counted in UNIQUE recipients reached outside a customer
@@ -76,6 +99,8 @@ export interface PhoneNumber {
    */
   displayPhoneNumber: string
   qualityRating?: QualityRating
+  /** What `?fields=status` reads; `CONNECTED` when unset. */
+  status?: ConnectionStatus
   /** The display name it was created with; wamock's default when unset. */
   verifiedName?: string
   /** `UNVERIFIED` until `verify_code` passes; verified when unset. */
@@ -84,6 +109,11 @@ export interface PhoneNumber {
   registered?: boolean
   /** The two-step verification PIN the first `register` set. */
   pin?: string
+  /**
+   * When a throughput upgrade finishes: until then the number answers
+   * 131057, and from then on its throughput is the higher one.
+   */
+  upgradedAt?: number
   /**
    * Set with `POST /{phone_number_id}` and `webhook_configuration`: this
    * number's webhooks go here, ahead of its WABA's override and the app's URL.

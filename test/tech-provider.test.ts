@@ -411,6 +411,31 @@ describe('template_status_update webhooks', () => {
 
 // --- §9.5 Quality and messaging limits ------------------------------------
 
+describe('phone number status', () => {
+  it('is CONNECTED until Meta changes it, then reads what Meta set, silently', async () => {
+    const pnid = engine.state.defaultPhoneNumberId
+    expect((await get(`/v26.0/${pnid}?fields=quality_rating,status`)).json()).toMatchObject({ status: 'CONNECTED' })
+    for (const status of ['FLAGGED', 'RESTRICTED', 'MESSAGING_LIMIT_TIER_4']) {
+      expect((await post('/__mock/phone-status', { status })).json()).toEqual({ success: true })
+      expect((await get(`/v26.0/${pnid}?fields=status`)).json().status).toBe(status)
+    }
+    expect(inbox).toHaveLength(0)
+    engine.reset()
+    expect((await get(`/v26.0/${engine.state.defaultPhoneNumberId}?fields=status`)).json().status).toBe('CONNECTED')
+  })
+
+  it('takes only the statuses in Meta’s enum, and names a stray key', async () => {
+    // BANNED is not in Meta's enum for a number's status.
+    for (const body of [{ status: 'BANNED' }, { status: 'FLAGGED', typo: 1 }, {}]) {
+      const res = await post('/__mock/phone-status', body)
+      expect(res.statusCode, JSON.stringify(body)).toBe(400)
+      expect(res.json().error.code).toBe(100)
+    }
+    expect((await post('/__mock/phone-status', { status: 'FLAGGED', typo: 1 })).json().error.error_data.details).toMatch(/typo/)
+    expect((await post('/__mock/phone-status', { phone_number_id: 'NOPE', status: 'FLAGGED' })).statusCode).toBe(400)
+  })
+})
+
 describe('quality rating', () => {
   it('changes the rating a phone number lookup reports', async () => {
     const res = await post('/__mock/quality', {

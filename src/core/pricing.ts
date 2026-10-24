@@ -44,44 +44,28 @@ export const FREE_SERVICE_MESSAGES_PER_MONTH = 1_000
 export type PricingCategory = 'service' | 'utility' | 'marketing' | 'authentication' | 'authentication_international'
 
 /**
- * Markets with an authentication-international rate, by ISO country, and
- * the day each launched (Meta's "Authentication-international rates" page;
- * the last nine on October 1, 2026). Kazakhstan shares +7 with Russia, which
- * wamock's calling-code table maps to Russia, so a Kazakh user is not told
- * apart.
+ * Markets with an authentication-international rate, by ISO country: the 18
+ * on Meta's "Authentication-international rates" page, the last nine since
+ * October 1, 2026. All of them, whatever the virtual date: wamock emulates
+ * Meta as it runs today, and its clock measures windows and expiries, not
+ * which year's rules apply. Kazakhstan shares +7 with Russia, which wamock's
+ * calling-code table maps to Russia, so a Kazakh user is not told apart.
  */
-export const AUTH_INTERNATIONAL_MARKETS: Readonly<Record<string, number>> = {
-  ID: Date.UTC(2024, 5, 1),
-  IN: Date.UTC(2024, 6, 1),
-  EG: Date.UTC(2025, 1, 1),
-  MY: Date.UTC(2025, 1, 1),
-  NG: Date.UTC(2025, 1, 1),
-  PK: Date.UTC(2025, 1, 1),
-  SA: Date.UTC(2025, 1, 1),
-  ZA: Date.UTC(2025, 1, 1),
-  AE: Date.UTC(2025, 1, 1),
-  BD: Date.UTC(2026, 9, 1),
-  IQ: Date.UTC(2026, 9, 1),
-  KZ: Date.UTC(2026, 9, 1),
-  KW: Date.UTC(2026, 9, 1),
-  MA: Date.UTC(2026, 9, 1),
-  NP: Date.UTC(2026, 9, 1),
-  OM: Date.UTC(2026, 9, 1),
-  LK: Date.UTC(2026, 9, 1),
-  UA: Date.UTC(2026, 9, 1),
-}
+export const AUTH_INTERNATIONAL_MARKETS: ReadonlySet<string> = new Set([
+  'ID', 'IN', 'EG', 'MY', 'NG', 'PK', 'SA', 'ZA', 'AE',
+  'BD', 'IQ', 'KZ', 'KW', 'MA', 'NP', 'OM', 'LK', 'UA',
+])
 
 /**
  * Whether an authentication template to a user in `country` is billed the
- * authentication-international rate: the market has the rate by now, the
- * business is eligible and past its start time for that country, and the
- * user is not in the country the business is based in ("You will always be
- * charged the domestic rate for your primary business location").
+ * authentication-international rate: the market has the rate, the business
+ * is eligible and past its start time for that country, and the user is not
+ * in the country the business is based in ("You will always be charged the
+ * domestic rate for your primary business location").
  */
 export function isAuthInternational(business: Business | undefined, country: string, nowMs: number): boolean {
-  const launch = AUTH_INTERNATIONAL_MARKETS[country]
   const eligibility = business?.authInternational
-  if (launch === undefined || nowMs < launch || !eligibility || business?.primaryLocation === country) return false
+  if (!AUTH_INTERNATIONAL_MARKETS.has(country) || !eligibility || business?.primaryLocation === country) return false
   const start = eligibility.exceptions.find((exception) => exception.country === country)?.startTime ?? eligibility.startTime
   return nowMs >= start
 }

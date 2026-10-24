@@ -6,13 +6,13 @@ import { freshId } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
 import { callingCodeOf, countryOf, toGraphDisplayNumber } from '../core/phone.js'
 import type { DebugTokenData, TokenKind } from '../core/tokens.js'
-import type { MessagingTier, QualityRating } from '../core/types.js'
+import type { ConnectionStatus, MessagingTier, PhoneNumber, QualityRating } from '../core/types.js'
 import { isWebUrl } from '../core/values.js'
 import { pageOf } from './paging.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 import type { CoexistenceSeed, CoexistenceService } from './coexistence-service.js'
 import { buildAccountUpdatePayload, buildAuthInternationalPayload } from '../webhooks/coexistence-payloads.js'
-import { buildBusinessCapabilityPayload } from '../webhooks/tech-payloads.js'
+import { buildBusinessCapabilityPayload, buildThroughputUpgradePayload } from '../webhooks/tech-payloads.js'
 
 /**
  * Tech Provider mode (spec §9) — onboarding OTHER businesses onto your own
@@ -65,6 +65,8 @@ interface SignupCode {
 export class TechProviderService {
   readonly #context: MockContext
   readonly #signupCodes = new Map<string, SignupCode>()
+  /** Throughput upgrades still finishing, cancelled by `clear()`. */
+  readonly #timers = new Set<number>()
   /** Business app onboarding happens through signup; the rest lives there. */
   readonly #coexistence: CoexistenceService
 
@@ -479,7 +481,7 @@ export class TechProviderService {
       display_phone_number: toGraphDisplayNumber(phoneNumber.displayPhoneNumber),
       verified_name: phoneNumber.verifiedName ?? 'wamock Test Business',
       quality_rating: phoneNumber.qualityRating ?? 'GREEN',
-      status: 'CONNECTED',
+      status: phoneNumber.status ?? 'CONNECTED',
       name_status: 'APPROVED',
       unified_cert_status: 'APPROVED',
       account_mode: 'LIVE',
@@ -496,6 +498,9 @@ export class TechProviderService {
       code_verification_status: phoneNumber.verification ?? 'VERIFIED',
       platform_type: 'CLOUD_API',
       is_on_biz_app: this.#coexistence.isOnBizApp(phoneNumberId),
+      // Meta's docs show `{ level: "STANDARD" }`; the level after an upgrade
+      // is not documented, and `HIGH` is what third-party guides report.
+      throughput: { level: phoneNumber.upgradedAt !== undefined && this.#context.clock.now() >= phoneNumber.upgradedAt ? 'HIGH' : 'STANDARD' },
       // Where this number's webhooks can go, each key only when set: its own
       // override, its WABA's, and the app's callback URL.
       webhook_configuration: this.#webhookConfiguration(phoneNumberId, phoneNumber.wabaId),
@@ -524,6 +529,16 @@ export class TechProviderService {
   }
 
   /**
+   * Control API: Meta changing a number's `status`, read with
+   * `?fields=status`. Silently, as quality: no webhook documents the change.
+   */
+  setPhoneStatus(phoneNumberId: string, status: ConnectionStatus): { success: true } {
+    requirePhoneNumber(this.#context, phoneNumberId)
+    this.#context.state.updatePhoneNumber(phoneNumberId, { status })
+    return { success: true }
+  }
+
+  /**
    * Control API: set the messaging limit of the portfolio that owns this
    * number, and announce it with `business_capability_update` on every WABA
    * in that portfolio — every sibling number's limit changed with it.
@@ -548,7 +563,55 @@ export class TechProviderService {
     return { success: true }
   }
 
+  /**
+   * Control API: Meta upgrades a number to higher throughput, 80 to 1,000
+   * messages per second (Meta's throughput page). Eligible only with an
+   * unlimited portfolio and a quality of YELLOW or better; the 100K unique
+   * recipients a day Meta also asks for is the caller's to have simulated.
+   * The upgrade takes up to a minute, during which the number answers 131057;
+   * then `phone_number_quality_update` announces it.
+   */
+  upgradeThroughput(phoneNumberId: string): { success: true } {
+    const { state, clock, dispatcher } = this.#context
+    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId)
+    const refuse = (details: string) => new GraphError(ERROR_CODES.INVALID_PARAMETER, { details })
+    const businessId = state.businessIdOf(phoneNumberId) ?? state.defaultBusinessId
+    if (state.business(businessId)?.messagingTier !== 'TIER_UNLIMITED') {
+      throw refuse('Higher throughput needs a business portfolio with an unlimited messaging limit')
+    }
+    if (phoneNumber.qualityRating === 'RED' || phoneNumber.qualityRating === 'UNKNOWN') {
+      throw refuse('Higher throughput needs a quality rating of YELLOW or better')
+    }
+    if (this.#coexistence.isOnBizApp(phoneNumberId)) {
+      throw refuse('A number shared with the WhatsApp Business app keeps a fixed throughput of 20 messages per second')
+    }
+    if (phoneNumber.upgradedAt !== undefined) throw refuse(`${phoneNumberId} is already on higher throughput`)
+
+    const upgradedAt = clock.now() + THROUGHPUT_UPGRADE_MS
+    state.registerPhoneNumber({ ...phoneNumber, upgradedAt })
+    const timer = clock.at(upgradedAt, () => {
+      this.#timers.delete(timer)
+      const current = state.phoneNumber(phoneNumberId)
+      if (!current) return
+      dispatcher.dispatch(
+        phoneNumberId,
+        buildThroughputUpgradePayload({ wabaId: current.wabaId, displayPhoneNumber: current.displayPhoneNumber, timeMs: clock.now() }),
+      )
+    })
+    this.#timers.add(timer)
+    return { success: true }
+  }
+
   clear(): void {
     this.#signupCodes.clear()
+    for (const timer of this.#timers) this.#context.clock.clear(timer)
+    this.#timers.clear()
   }
 }
+
+/** "The upgrade process itself can take up to 1 minute." */
+const THROUGHPUT_UPGRADE_MS = 60 * 1000
+
+/** Whether a number is mid-upgrade, answering 131057 to API requests. */
+export const isInMaintenance = (phoneNumber: PhoneNumber, nowMs: number): boolean =>
+  phoneNumber.upgradedAt !== undefined && nowMs < phoneNumber.upgradedAt

@@ -99,6 +99,7 @@ export interface AccountChange {
   field:
     | 'message_template_status_update'
     | 'business_capability_update'
+    | 'phone_number_quality_update'
     | 'template_category_update'
     | 'user_preferences'
     | 'account_update'

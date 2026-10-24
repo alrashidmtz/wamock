@@ -6,7 +6,7 @@ import { CoexistenceService } from '../graph/coexistence-service.js'
 import type { CoexistenceSeed } from '../graph/coexistence-service.js'
 import { MessagingService } from '../graph/messaging-service.js'
 import type { SendMessageResponse, SimulateInboundOptions } from '../graph/messaging-service.js'
-import { TechProviderService } from '../graph/tech-provider-service.js'
+import { TechProviderService, isInMaintenance } from '../graph/tech-provider-service.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 import type { PhoneNumberListOptions, SignupOptions } from '../graph/tech-provider-service.js'
 import { TemplateService } from '../graph/template-service.js'
@@ -28,7 +28,7 @@ import { MockState } from './state.js'
 import type { Template, TemplateCategory, TemplateStatus, TemplateView } from './templates.js'
 import type { DebugTokenData, TokenKind } from './tokens.js'
 import { TokenStore } from './tokens.js'
-import type { MessagingTier, QualityRating } from './types.js'
+import type { ConnectionStatus, MessagingTier, QualityRating } from './types.js'
 import { ServiceWindows } from './window.js'
 
 /**
@@ -608,6 +608,18 @@ export class WamockEngine {
   }
 
   /**
+   * Meta's throughput page: while a number is upgraded, "the number will not
+   * be usable on our platform. If used in an API request, the API will return
+   * error code 131057". The Graph door calls this for every request on a
+   * number, after its token passed; the control API, which plays Meta, is not
+   * held up.
+   */
+  assertNumberUsable(objectId: string): void {
+    const phoneNumber = this.state.phoneNumber(objectId)
+    if (phoneNumber && isInMaintenance(phoneNumber, this.clock.now())) throw new GraphError(ERROR_CODES.MAINTENANCE_MODE)
+  }
+
+  /**
    * The permissions a Graph call needs: whatsapp_business_messaging to send
    * and handle media, whatsapp_business_management to manage templates,
    * numbers and subscriptions, both to register a number. Calls outside them
@@ -655,6 +667,16 @@ export class WamockEngine {
 
   getPhoneNumberFields(phoneNumberId: string, fields: string[]): Record<string, unknown> {
     return this.#techProvider.getPhoneNumberFields(phoneNumberId, fields)
+  }
+
+  /** Control API: Meta upgrades a number to higher throughput. */
+  upgradeThroughput(phoneNumberId: string): { success: true } {
+    return this.#techProvider.upgradeThroughput(phoneNumberId)
+  }
+
+  /** Control API: Meta changes the number's `status`. */
+  setPhoneStatus(phoneNumberId: string, status: ConnectionStatus): { success: true } {
+    return this.#techProvider.setPhoneStatus(phoneNumberId, status)
   }
 
   setQuality(phoneNumberId: string, quality: QualityRating): { success: true } {

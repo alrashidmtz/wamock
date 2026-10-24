@@ -414,6 +414,7 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       ...(edge !== undefined ? { edge } : {}),
       method: request.method === 'DELETE' ? 'delete' : request.method === 'POST' ? 'post' : 'get',
     })
+    if (objectId !== undefined) engine.assertNumberUsable(objectId)
   })
 
   app.get<{ Params: { version: string; wabaId: string }; Querystring: Record<string, string> }>(

@@ -116,22 +116,12 @@ describe('authentication-international rates', () => {
     expect(await billedAs(INDONESIA)).toBe('authentication_international')
   })
 
-  it('apply in a market only from its launch: Bangladesh on October 1, 2026', async () => {
-    const { e, billedAs } = harness(Date.UTC(2026, 8, 30, 23, 0))
-    e.setAuthInternational(e.state.defaultBusinessId, { startTime: Date.UTC(2026, 0, 1) })
-    expect(await billedAs(BANGLADESH)).toBe('authentication')
-    e.clock.advance(60 * 60 * 1000)
+  it('apply in every market on Meta’s page today, whatever date the virtual clock starts at', async () => {
+    // wamock emulates Meta as it runs now: Bangladesh joined on October 1,
+    // 2026, and a clock started before then still bills it at the rate.
+    const { e, billedAs } = harness(Date.UTC(2025, 0, 15))
+    e.setAuthInternational(e.state.defaultBusinessId, { startTime: Date.UTC(2025, 0, 1) })
     expect(await billedAs(BANGLADESH)).toBe('authentication_international')
-  })
-
-  it('apply in a market from the very millisecond of its launch', async () => {
-    // Sent 500ms before midnight UTC: the delivered status goes out at midnight.
-    const launch = Date.UTC(2026, 9, 1)
-    for (const [start, category] of [[launch - 500, 'authentication_international'], [launch - 501, 'authentication']] as const) {
-      const { e, billedAs } = harness(start)
-      e.setAuthInternational(e.state.defaultBusinessId, { startTime: Date.UTC(2026, 0, 1) })
-      expect(await billedAs(BANGLADESH), String(launch - start)).toBe(category)
-    }
   })
 
   it('announce eligibility and the primary location on account_update, with times in seconds', async () => {
@@ -157,28 +147,10 @@ describe('authentication-international rates', () => {
 })
 
 describe('the markets with the rate', () => {
-  it('are the 18 on Meta’s page, each from its launch day', () => {
-    const day = (ms: number) => new Date(ms).toISOString().slice(0, 10)
-    expect(Object.fromEntries(Object.entries(AUTH_INTERNATIONAL_MARKETS).map(([country, launch]) => [country, day(launch)]))).toEqual({
-      ID: '2024-06-01',
-      IN: '2024-07-01',
-      EG: '2025-02-01',
-      MY: '2025-02-01',
-      NG: '2025-02-01',
-      PK: '2025-02-01',
-      SA: '2025-02-01',
-      ZA: '2025-02-01',
-      AE: '2025-02-01',
-      BD: '2026-10-01',
-      IQ: '2026-10-01',
-      KZ: '2026-10-01',
-      KW: '2026-10-01',
-      MA: '2026-10-01',
-      NP: '2026-10-01',
-      OM: '2026-10-01',
-      LK: '2026-10-01',
-      UA: '2026-10-01',
-    })
+  it('are the 18 on Meta’s page', () => {
+    expect([...AUTH_INTERNATIONAL_MARKETS].sort()).toEqual(
+      ['AE', 'BD', 'EG', 'ID', 'IN', 'IQ', 'KW', 'KZ', 'LK', 'MA', 'MY', 'NG', 'NP', 'OM', 'PK', 'SA', 'UA', 'ZA'],
+    )
   })
 })
 

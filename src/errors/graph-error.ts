@@ -58,6 +58,8 @@ export const ERROR_CODES = {
   BSUID_NOT_SUPPORTED: 131062,
   /** The number is not (or no longer) on Cloud API, e.g. a disconnected coexistence number. */
   NOT_REGISTERED: 133010,
+  /** A number in maintenance, as during its throughput upgrade. */
+  MAINTENANCE_MODE: 131057,
   /** `register` for a number whose ownership was not verified yet. */
   NOT_VERIFIED: 133006,
   /** `register` with a PIN other than the number's two-step verification PIN. */
@@ -314,6 +316,17 @@ const CATALOG: Record<number, CatalogEntry> = {
     errorData: true,
     retriable: false,
   },
+  [ERROR_CODES.MAINTENANCE_MODE]: {
+    // Meta's error code reference: the code, its title, and its description.
+    // It gives no HTTP status; 400 is inferred, as for Graph's other errors.
+    message: 'Business Account is in maintenance mode',
+    type: 'OAuthException',
+    httpStatus: 400,
+    details:
+      'The WhatsApp Business account is in maintenance mode. One reason for this could be that the account is undergoing a throughput upgrade.',
+    errorData: true,
+    retriable: true,
+  },
   [ERROR_CODES.NOT_VERIFIED]: {
     // Meta's error code reference gives this sentence and no shorter title.
     message: 'Phone number needs to be verified before registering.',
@@ -462,6 +475,15 @@ export class GraphError extends Error {
   readonly #entry: CatalogEntry
   readonly #details: string | undefined
   readonly #extra: Record<string, unknown> | undefined
+
+  /**
+   * Why the call failed, as `error_data.details` carries it over HTTP. The
+   * message stays Meta's (`(#100) Invalid parameter`), so in library mode the
+   * reason is here, not in the message.
+   */
+  get details(): string | undefined {
+    return this.#entry.errorData ? (this.#details ?? this.#entry.message) : undefined
+  }
 
   constructor(code: number, options: GraphErrorOptions = {}) {
     const entry = { ...entryFor(code), ...options.shape }

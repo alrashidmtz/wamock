@@ -293,6 +293,28 @@ describe('readReceipts', () => {
 })
 
 describe('what a custom transport needs is exported', () => {
+  it('tells a library caller why a call failed, as error_data.details does over HTTP', async () => {
+    const lib = await import('../src/lib.js')
+    const engine = new lib.WamockEngine({ appSecret: 's', mode: 'frozen' })
+    const caught = (fn: () => unknown) => {
+      try {
+        fn()
+      } catch (error) {
+        return error as InstanceType<typeof lib.GraphError>
+      }
+      throw new Error('expected a GraphError')
+    }
+    const upload = caught(() => engine.uploadMedia(engine.state.defaultPhoneNumberId, { messaging_product: 'whatsapp', type: 'image/png' }))
+    expect(upload.message).toBe('(#100) Invalid parameter')
+    expect(upload.details).toMatch(/file/)
+    expect(upload.details).toBe(upload.toBody('x').error.error_data?.details)
+    const { phone_number_id: pnid } = engine.createSignup()
+    const inbound = caught(() => engine.simulateInbound({ phoneNumberId: pnid, from: '5215555000001', message: { type: 'text', text: { body: 'hola' } } }))
+    expect(inbound.details).toMatch(/not registered/)
+    // A Graph error with no error_data has no details either, as over HTTP.
+    expect(new lib.GraphError(lib.ERROR_CODES.TOKEN_EXPIRED).details).toBeUndefined()
+  })
+
   it('exports DeliveryCancelled, so a transport can cancel and be understood', async () => {
     const lib = await import('../src/lib.js')
     expect(new lib.DeliveryCancelled()).toBeInstanceOf(Error)

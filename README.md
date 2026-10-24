@@ -432,6 +432,12 @@ base URL or an HTTP proxy.
 | Works offline, in CI | ✅ | ✅ | ❌ |
 | Vendor-neutral | ✅ | ✅ | ❌ |
 
+**wamock emulates Meta as it runs today, whatever date its clock starts
+at.** The virtual clock measures windows, expiries and retries; it does not
+select which year's rules apply. A test that starts the clock in January 2026
+still gets October 2026's pricing (a utility template inside the service
+window is billable, and only 1,000 service messages a month are free).
+
 **Honest caveat:** the `pricing` object, the portfolio messaging limits,
 business-scoped user IDs, free entry point windows, `user_preferences`, the
 template pause and recategorization flows, and coexistence are modeled from
@@ -499,9 +505,11 @@ Graph routes read a body as what it is labelled, as Meta does.
 | `POST /__mock/templates/{name}/{language}/recategorize` | `{to, notice?}` — `UTILITY\|MARKETING\|AUTHENTICATION`; optional `?waba_id=` | Meta's automated recategorization: notice now, change in 24h |
 | `POST /__mock/scenario` | `{seed?, latencyMs?, sendFailureRate?, webhookFailureRate?, duplicateWebhooks?, outOfOrderStatuses?, nextError?:{code,times?}}` | latency, failure rates, duplication, ordering |
 | `POST /__mock/embedded-signup` | `{subscribed?, registered?, phone?, business_id?, coexistence?}` | mint a signup code; the WABA starts unsubscribed and its number unregistered, as with Meta (`subscribed: true` and `registered: true` skip those steps). An unregistered number neither sends (`133010`) nor receives: `/__mock/inbound` to it is refused. `phone` is how the customer finished: `verified` (default), `unverified` (which `registered: true` cannot register: it must be verified first) or `none` (no `phone_number_id`). A `coexistence` number is already registered. Optionally under an existing business portfolio |
+| `POST /__mock/throughput-upgrade` | `{phone_number_id?}` | Meta upgrades the number to higher throughput: every Graph request on it answers `131057` for a minute, then `phone_number_quality_update` `THROUGHPUT_UPGRADE`. Needs an unlimited portfolio and a quality of YELLOW or better |
 | `POST /__mock/auth-international` | `{business_id?, start_time?, exception_countries?:[{country_code, start_time}], primary_business_location?}` (unix seconds; start 30 days out by default) | Meta deems the portfolio eligible for authentication-international rates, and says so on `account_update` |
 | `GET /__mock/verification-code?phone_number_id=` | — | the code `request_code` "sent" to a number, as its SMS would read (`mock.verificationCode(id)` in a test) |
 | `POST /__mock/tokens` | `{kind?, scopes?}` — `permanent\|short\|long` | mint a token to exercise expiry and missing scopes |
+| `POST /__mock/phone-status` | `{status}` — a value of Meta's enum for a number's status (`CONNECTED`, `DISCONNECTED`, `PENDING`, `FLAGGED`, `RESTRICTED`, `RATE_LIMITED`, `MESSAGING_LIMIT_TIER_0`…`4`); optional `phone_number_id` | change what `?fields=status` reads, silently. The values are inferred: Meta's reference gives this enum to a status update's `connection_status`, not to the field a read returns. Meta does not document what each status does to sends, so wamock only reports it |
 | `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN\|UNKNOWN`; optional `phone_number_id` | change a number's quality rating, silently (see below) |
 | `POST /__mock/tier` | `{tier}` — `TIER_250\|TIER_2K\|TIER_10K\|TIER_100K\|TIER_UNLIMITED`, or wamock's `TIER_1\|TIER_2`; optional `phone_number_id` | set the messaging limit of that number's business portfolio; announces `business_capability_update` |
 | `POST /__mock/reset` | `{}` | back to the seed state |
@@ -528,11 +536,12 @@ that breaks and that no other mock covers.
 | `POST /{version}/{phone_number_id}/request_code` · `verify_code` | `code_method` (`SMS`\|`VOICE`) and `language`, then `code`, in the query or the body; `136024` for a number already verified |
 | `POST /{version}/{phone_number_id}/register` · `deregister` | `{messaging_product, pin}`: the first PIN becomes the number's (`133005` after); `133006` until verified; 10 calls per 72h (`133016`). A coexistence number cannot be deregistered |
 | `GET /{version}/{waba_id}/phone_numbers` | every number on the WABA, as Embedded Signup's last step reads them: `verified_name`, `display_phone_number`, `id`, `quality_rating` by default, or `?fields=`; newest first, or oldest with `sort=['last_onboarded_time_ascending']` / `last_onboarded_time.asc`; paged with `limit`, `after`, `before` |
-| `GET /{version}/{phone_number_id}?fields=` | by default `id`, `display_phone_number`, `verified_name`, `quality_rating`; also `status`, `name_status`, `unified_cert_status`, `code_verification_status`, `account_mode`, `host_platform`, `platform_type`, `is_on_biz_app`, `country_code`, `country_dial_code`, `is_official_business_account`, `whatsapp_business_manager_messaging_limit` (and the deprecated `messaging_limit_tier`, same value), `webhook_configuration` |
+| `GET /{version}/{phone_number_id}?fields=` | by default `id`, `display_phone_number`, `verified_name`, `quality_rating`; also `status`, `name_status`, `unified_cert_status`, `code_verification_status`, `account_mode`, `host_platform`, `platform_type`, `is_on_biz_app`, `country_code`, `country_dial_code`, `is_official_business_account`, `whatsapp_business_manager_messaging_limit` (and the deprecated `messaging_limit_tier`, same value), `throughput`, `webhook_configuration` |
 | `POST /{version}/{phone_number_id}` | `webhook_configuration: {override_callback_uri, verify_token}`: the number's own callback URL, ahead of its WABA's; `""` removes it. Needs the WABA subscribed. The other settings this call takes in production are not emulated |
 
 Control endpoints: `POST /__mock/embedded-signup`, `POST /__mock/tokens`,
-`POST /__mock/quality`, `POST /__mock/tier`.
+`POST /__mock/quality`, `POST /__mock/phone-status`, `POST /__mock/tier`,
+`POST /__mock/throughput-upgrade`.
 
 A token wamock issued is checked on every Graph route. Expired or revoked, it
 fails with `190` wherever it is used, not only on sends. It needs
@@ -591,9 +600,15 @@ count. Since October 2025 the limit belongs to the **business portfolio**: every
 number in it draws on the same cap, and one busy number can block its siblings.
 
 No webhook announces a number's **quality rating** any more.
-`phone_number_quality_update` now reports throughput and limit changes only, so
-a receiver waiting on it for a downgrade waits forever. Poll
-`?fields=quality_rating` instead.
+`phone_number_quality_update` now reports throughput changes only (`event`
+`ONBOARDING` or `THROUGHPUT_UPGRADE`), so a receiver waiting on it for a
+downgrade waits forever. Poll `?fields=quality_rating,status` instead;
+`POST /__mock/quality` and `POST /__mock/phone-status` change what it reads.
+`POST /__mock/throughput-upgrade` plays Meta upgrading a number to 1,000
+messages per second: every Graph request on the number answers `131057` for
+the minute the upgrade takes,
+then sends `THROUGHPUT_UPGRADE`, and `?fields=throughput` reads `HIGH` (the
+level Meta documents is `STANDARD`; `HIGH` is what third-party guides report).
 
 ### Coexistence — the WhatsApp Business app and Cloud API on one number
 
@@ -651,6 +666,7 @@ you its result.
 | `133005` / `133006` / `133016` | `register` with the wrong PIN, before verifying, or more than 10 times in 72h | no |
 | `130403` | a message to a customer the business blocked — on the **status**, not the send | no — unblock them first |
 | `139100` | some users in a block or unblock request could not be; the per-user errors (`131047`, `131021`, `139101`) come beside it | no |
+| `131057` | a number mid throughput upgrade (the minute it takes) | yes, once the upgrade is done |
 | `131059` | listing templates with a `before`/`after` cursor that names no template (v24+). Meta documents the code but not its message; wamock's restates the changelog | no — retry without the cursor |
 | `132012` | a template parameter's value is not in the form its type needs | no |
 | `132018` | Meta's catch-all for invalid template parameters; wamock answers the specific `132000`/`132012`, and gives `132018` its wording when a scenario forces it | no |

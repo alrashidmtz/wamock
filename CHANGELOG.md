@@ -4,6 +4,42 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.6.2] — 2026-10-24
+
+From TaskersPro testing 0.6.1 against its suite.
+
+### Added
+
+- **The throughput upgrade.** `POST /__mock/throughput-upgrade` (and
+  `engine.upgradeThroughput`) plays Meta upgrading a number from 80 to 1,000
+  messages per second, as its throughput page describes: only with an
+  unlimited portfolio and a quality of YELLOW or better, never for a number
+  shared with the WhatsApp Business app. For the minute the upgrade takes,
+  every Graph request on the number answers `131057` (the HTTP status, 400,
+  is inferred: Meta's reference gives none); then `phone_number_quality_update` arrives with
+  `event` `THROUGHPUT_UPGRADE` and `max_daily_conversations_per_business`
+  `TIER_UNLIMITED`. `?fields=throughput` reads `{ level: "STANDARD" }`, and
+  `HIGH` after the upgrade (Meta documents only `STANDARD`; `HIGH` is what
+  third-party guides report).
+- **`POST /__mock/phone-status`** (and `engine.setPhoneStatus`) changes what
+  `?fields=status` reads, to a value of the enum Meta's reference gives a
+  status update's `connection_status` (`FLAGGED`, `RESTRICTED`…; inferred
+  for the read field, which the reference lists no values for); it was
+  always `CONNECTED`. With no webhook announcing a
+  quality drop, polling `quality_rating,status` is how an app notices one, and
+  TaskersPro's pause now does exactly that. Only reported: Meta does not
+  document what each status does to sends.
+- **`GraphError.details`**: why a call failed, as `error_data.details`
+  carries it over HTTP. In library mode the message stayed `(#100) Invalid
+  parameter` and the reason was out of reach.
+
+### Changed
+
+- **wamock emulates Meta as it runs today, whatever date its clock starts
+  at**, and the README now says so. The one exception is gone:
+  authentication-international rates applied in each market only from its
+  launch date; all 18 markets on Meta's page apply now.
+
 ## [0.6.1] — 2026-10-24
 
 ### Fixed

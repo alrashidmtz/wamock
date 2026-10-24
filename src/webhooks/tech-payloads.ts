@@ -1,3 +1,4 @@
+import { toWebhookDisplayNumber } from '../core/phone.js'
 import type { AccountChange, WebhookPayload } from './payloads.js'
 
 /**
@@ -86,6 +87,39 @@ export function buildBusinessCapabilityPayload(options: {
             field: 'business_capability_update',
             value: {
               max_daily_conversations_per_business: options.maxDailyConversationsPerBusiness,
+            },
+          },
+        ],
+      },
+    ],
+  }
+}
+
+/**
+ * `phone_number_quality_update` for a throughput upgrade, as Meta's
+ * throughput page describes it: `event` THROUGHPUT_UPGRADE and
+ * `max_daily_conversations_per_business` TIER_UNLIMITED. The older
+ * `current_limit` is left out: the reference says it was removed in February
+ * 2026. The business number is digits only, as in every webhook.
+ */
+export function buildThroughputUpgradePayload(options: {
+  wabaId: string
+  displayPhoneNumber: string
+  timeMs: number
+}): WebhookPayload<AccountChange> {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: options.wabaId,
+        time: Math.floor(options.timeMs / 1000),
+        changes: [
+          {
+            field: 'phone_number_quality_update',
+            value: {
+              display_phone_number: toWebhookDisplayNumber(options.displayPhoneNumber),
+              event: 'THROUGHPUT_UPGRADE',
+              max_daily_conversations_per_business: 'TIER_UNLIMITED',
             },
           },
         ],
