@@ -66,7 +66,7 @@ describe('a throughput upgrade', () => {
     e.setTier(pnid, 'TIER_2K')
     expect(codeOf(() => e.upgradeThroughput(pnid))).toBe(100)
     e.setTier(pnid, 'TIER_UNLIMITED')
-    for (const quality of ['RED', 'UNKNOWN'] as const) {
+    for (const quality of ['RED', 'NA', 'UNKNOWN'] as const) {
       e.setQuality(pnid, quality)
       expect(codeOf(() => e.upgradeThroughput(pnid)), quality).toBe(100)
     }

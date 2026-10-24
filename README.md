@@ -510,7 +510,7 @@ Graph routes read a body as what it is labelled, as Meta does.
 | `GET /__mock/verification-code?phone_number_id=` | — | the code `request_code` "sent" to a number, as its SMS would read (`mock.verificationCode(id)` in a test) |
 | `POST /__mock/tokens` | `{kind?, scopes?}` — `permanent\|short\|long` | mint a token to exercise expiry and missing scopes |
 | `POST /__mock/phone-status` | `{status}` — a value of Meta's enum for a number's status (`CONNECTED`, `DISCONNECTED`, `PENDING`, `FLAGGED`, `RESTRICTED`, `RATE_LIMITED`, `MESSAGING_LIMIT_TIER_0`…`4`); optional `phone_number_id` | change what `?fields=status` reads, silently. The values are inferred: Meta's reference gives this enum to a status update's `connection_status`, not to the field a read returns. Meta does not document what each status does to sends, so wamock only reports it |
-| `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN\|UNKNOWN`; optional `phone_number_id` | change a number's quality rating, silently (see below) |
+| `POST /__mock/quality` | `{quality_rating}` — `RED\|YELLOW\|GREEN\|NA\|UNKNOWN` (Meta spells a number not rated yet both `NA` and `UNKNOWN`); optional `phone_number_id` | change a number's quality rating, silently (see below) |
 | `POST /__mock/tier` | `{tier}` — `TIER_250\|TIER_2K\|TIER_10K\|TIER_100K\|TIER_UNLIMITED`, or wamock's `TIER_1\|TIER_2`; optional `phone_number_id` | set the messaging limit of that number's business portfolio; announces `business_capability_update` |
 | `POST /__mock/reset` | `{}` | back to the seed state |
 | `GET /__mock/state` · `GET /__mock/messages` | — | inspect |

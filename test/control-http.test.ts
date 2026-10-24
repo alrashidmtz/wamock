@@ -198,7 +198,7 @@ describe('POST /__mock/inbound — each message type', () => {
 })
 
 describe('POST /__mock/quality', () => {
-  it.each(['RED', 'YELLOW', 'GREEN', 'UNKNOWN'] as const)('takes %s, one of Meta’s quality ratings', async (rating) => {
+  it.each(['RED', 'YELLOW', 'GREEN', 'NA', 'UNKNOWN'] as const)('takes %s, one of Meta’s quality ratings', async (rating) => {
     expect((await post('/__mock/quality', { quality_rating: rating })).statusCode).toBe(200)
     expect(engine.state.phoneNumber(engine.state.defaultPhoneNumberId)?.qualityRating).toBe(rating)
   })

@@ -43,12 +43,16 @@ export interface Waba {
 }
 
 /**
- * Meta's quality ratings. Meta contradicts itself on a number not rated yet:
- * the phone-number reference's enum says `NA`, its "Get all phone numbers"
- * example response shows `UNKNOWN`. wamock answers `UNKNOWN`, the spelling of
- * an actual response.
+ * Meta's quality ratings. Meta spells a number not rated yet both ways: the
+ * phone-number reference's enum and two example responses in "Business phone
+ * numbers" say `NA`, that page's filtering example says `UNKNOWN`. wamock
+ * takes both, so a test can play either response.
  */
-export type QualityRating = 'RED' | 'YELLOW' | 'GREEN' | 'UNKNOWN'
+export const QUALITY_RATINGS = ['RED', 'YELLOW', 'GREEN', 'NA', 'UNKNOWN'] as const
+export type QualityRating = (typeof QUALITY_RATINGS)[number]
+
+/** Not rated yet, in either of Meta's spellings. */
+export const isUnrated = (quality: QualityRating | undefined): boolean => quality === 'NA' || quality === 'UNKNOWN'
 
 /**
  * A number's `status`. Inferred: Meta's phone-number reference gives this enum

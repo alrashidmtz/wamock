@@ -3,7 +3,7 @@ import { z } from 'zod'
 
 import type { WamockEngine } from '../core/engine.js'
 import { TEMPLATE_CATEGORIES, TEMPLATE_STATUSES } from '../core/templates.js'
-import { CONNECTION_STATUSES, MESSAGING_TIERS } from '../core/types.js'
+import { CONNECTION_STATUSES, MESSAGING_TIERS, QUALITY_RATINGS } from '../core/types.js'
 import type { Business, PhoneNumber } from '../core/types.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import { LAST_INSTANT_MS } from '../core/clock.js'
@@ -184,7 +184,7 @@ const NumberChangeSchema = z
 const QualitySchema = z
   .object({
     phone_number_id: z.string().optional(),
-    quality_rating: z.enum(['RED', 'YELLOW', 'GREEN', 'UNKNOWN']),
+    quality_rating: z.enum(QUALITY_RATINGS),
   })
   .strict()
 
@@ -681,7 +681,7 @@ export function registerControlRoutes(app: FastifyInstance, engine: WamockEngine
     const parsed = QualitySchema.safeParse(request.body)
     if (!parsed.success) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {
-        details: 'quality_rating must be one of {RED, YELLOW, GREEN, UNKNOWN}',
+        details: `quality_rating must be one of {${QUALITY_RATINGS.join(', ')}}`,
       })
     }
     return reply.send(

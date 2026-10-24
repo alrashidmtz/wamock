@@ -4,6 +4,18 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.6.3] — 2026-10-24
+
+From TaskersPro testing 0.6.2.
+
+### Fixed
+
+- **`quality_rating` takes `NA` as well as `UNKNOWN`.** Meta spells a number
+  not rated yet both ways: the phone-number reference's enum and two example
+  responses say `NA`, one example says `UNKNOWN`. `POST /__mock/quality`
+  refused `NA`, so a test could not play the spelling Meta documents most.
+  Either one keeps a number from a throughput upgrade.
+
 ## [0.6.2] — 2026-10-24
 
 From TaskersPro testing 0.6.1 against its suite.

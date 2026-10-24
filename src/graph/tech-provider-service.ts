@@ -6,6 +6,7 @@ import { freshId } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
 import { callingCodeOf, countryOf, toGraphDisplayNumber } from '../core/phone.js'
 import type { DebugTokenData, TokenKind } from '../core/tokens.js'
+import { isUnrated } from '../core/types.js'
 import type { ConnectionStatus, MessagingTier, PhoneNumber, QualityRating } from '../core/types.js'
 import { isWebUrl } from '../core/values.js'
 import { pageOf } from './paging.js'
@@ -579,7 +580,7 @@ export class TechProviderService {
     if (state.business(businessId)?.messagingTier !== 'TIER_UNLIMITED') {
       throw refuse('Higher throughput needs a business portfolio with an unlimited messaging limit')
     }
-    if (phoneNumber.qualityRating === 'RED' || phoneNumber.qualityRating === 'UNKNOWN') {
+    if (phoneNumber.qualityRating === 'RED' || isUnrated(phoneNumber.qualityRating)) {
       throw refuse('Higher throughput needs a quality rating of YELLOW or better')
     }
     if (this.#coexistence.isOnBizApp(phoneNumberId)) {
