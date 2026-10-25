@@ -321,9 +321,15 @@ URL can be pointed at it in the same test.
 | `start` | now | Starting virtual time. Pin it for byte-identical runs |
 | `windowMs` | 24h | Shorten the service window so expiry tests are cheap |
 | `settleTimeoutMs` | 5000 | How long each helper waits for your receiver before giving up |
-| `phoneNumberId` | `PNID_DEFAULT` | Override the seeded number, to match your app's config |
-| `wabaId` | `WABA_DEFAULT` | Override the seeded WABA |
+| `phoneNumberId` | `200000000000004` | Override the seeded number, to match your app's config |
+| `wabaId` | `200000000000003` | Override the seeded WABA |
 | `displayPhoneNumber` | `15550001111` | The business number, digits only |
+
+Graph object ids are numeric strings, as Meta's are: portfolios, WABAs and
+numbers get 15 digits, media and templates longer ones. (Message ids keep
+Meta's `wamid.` shape, and BSUIDs theirs.) Read them from
+`mock.engine.state` (`defaultPhoneNumberId`, `defaultWabaId`…) or from what
+the call returned, rather than writing them into a test.
 
 The returned `mock`:
 

@@ -58,6 +58,6 @@ jobs:
           # variable changes nothing: use `installGraphInterceptor` from
           # `wamock/intercept` in your tests instead.
           GRAPH_API_BASE_URL: http://localhost:4004
-          WHATSAPP_PHONE_NUMBER_ID: PNID_DEFAULT
-          WHATSAPP_WABA_ID: WABA_DEFAULT
+          WHATSAPP_PHONE_NUMBER_ID: "200000000000004"
+          WHATSAPP_WABA_ID: "200000000000003"
           WA_APP_SECRET: ${{ secrets.WA_APP_SECRET || 'ci-test-secret' }}

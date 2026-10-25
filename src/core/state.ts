@@ -42,11 +42,15 @@ const DEFAULT_MAX_RECORDED = 10_000
 /** The seeded app's name, beside the seeded number's `verified_name`. */
 const DEFAULT_APP_NAME = 'wamock Test App'
 
+/**
+ * Numeric, as Meta's ids are, and outside the range `makeObjectId` draws
+ * from, so a generated id never lands on a seeded one.
+ */
 const DEFAULTS = {
-  businessId: 'BUSINESS_DEFAULT',
-  appId: 'APP_DEFAULT',
-  wabaId: 'WABA_DEFAULT',
-  phoneNumberId: 'PNID_DEFAULT',
+  businessId: '200000000000001',
+  appId: '200000000000002',
+  wabaId: '200000000000003',
+  phoneNumberId: '200000000000004',
   displayPhoneNumber: '15550001111',
 } as const
 

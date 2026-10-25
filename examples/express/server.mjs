@@ -18,7 +18,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 const APP_SECRET = process.env.WA_APP_SECRET ?? 'shhh'
 const VERIFY_TOKEN = process.env.WA_VERIFY_TOKEN ?? 'wamock-verify-token'
 const GRAPH_BASE = process.env.GRAPH_API_BASE_URL ?? 'http://localhost:4004'
-const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID ?? 'PNID_DEFAULT'
+const PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID ?? '200000000000004'
 
 const app = express()
 

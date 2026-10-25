@@ -34,8 +34,8 @@ services:
       # inside your tests instead, which swaps the destination underneath a
       # client without modifying it.
       GRAPH_API_BASE_URL: http://wamock:4004
-      WHATSAPP_PHONE_NUMBER_ID: PNID_DEFAULT
-      WHATSAPP_WABA_ID: WABA_DEFAULT
+      WHATSAPP_PHONE_NUMBER_ID: "200000000000004"
+      WHATSAPP_WABA_ID: "200000000000003"
       WA_APP_SECRET: ci-test-secret
     depends_on:
       wamock:

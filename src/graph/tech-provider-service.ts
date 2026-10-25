@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
 import { requirePhoneNumber, requireWaba } from '../core/guards.js'
-import { freshId } from '../core/ids.js'
+import { freshNumericId, makeObjectId } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
 import { callingCodeOf, countryOf, toGraphDisplayNumber } from '../core/phone.js'
 import type { DebugTokenData, TokenKind } from '../core/tokens.js'
@@ -112,16 +112,17 @@ export class TechProviderService {
     if (requested !== undefined && !state.business(requested) && state.isIdTaken(requested)) {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: `Id ${requested} belongs to another kind of object` })
     }
+    // The tenant's own counter value: its display number and signup code.
     const seq = state.nextSeq()
     const claimed = new Set(requested !== undefined ? [requested] : [])
-    const mint = (base: string) => {
-      const id = freshId(base, (candidate) => claimed.has(candidate) || state.isIdTaken(candidate))
+    const mint = () => {
+      const id = freshNumericId(makeObjectId, () => state.nextSeq(), (candidate) => claimed.has(candidate) || state.isIdTaken(candidate))
       claimed.add(id)
       return id
     }
-    const wabaId = mint(`WABA_TENANT_${seq}`)
-    const phoneNumberId = mint(`PNID_TENANT_${seq}`)
-    const businessId = requested ?? mint(`BUSINESS_TENANT_${seq}`)
+    const wabaId = mint()
+    const phoneNumberId = mint()
+    const businessId = requested ?? mint()
     if (!state.business(businessId)) state.registerBusiness(businessId)
 
     state.registerWaba({

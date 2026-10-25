@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { freshId, makeFbtraceId, makeMediaId, makeWamid } from '../../src/core/ids.js'
+import { freshNumericId, makeFbtraceId, makeMediaId, makeObjectId, makeWamid } from '../../src/core/ids.js'
 
 describe('makeWamid', () => {
   it('produces an id with the wamid. prefix Meta uses', () => {
@@ -44,13 +44,22 @@ describe('makeMediaId', () => {
 
 })
 
-describe('freshId', () => {
-  it('keeps the base when nothing holds it', () => {
-    expect(freshId('PNID_7', () => false)).toBe('PNID_7')
+describe('makeObjectId', () => {
+  it('is a 15-digit numeric string, as Meta’s portfolio, WABA and number ids are', () => {
+    expect(makeObjectId(1)).toBe('100000000000001')
+    expect(makeObjectId(12_345)).toMatch(/^\d{15}$/)
+  })
+})
+
+describe('freshNumericId', () => {
+  it('takes the counter’s first id when nothing holds it', () => {
+    let seq = 6
+    expect(freshNumericId(makeObjectId, () => ++seq, () => false)).toBe(makeObjectId(7))
   })
 
-  it('counts up past every suffix already held', () => {
-    const held = new Set(['PNID_7', 'PNID_7_2', 'PNID_7_3'])
-    expect(freshId('PNID_7', (id) => held.has(id))).toBe('PNID_7_4')
+  it('draws the counter past every id already held', () => {
+    let seq = 6
+    const held = new Set([makeObjectId(7), makeObjectId(8)])
+    expect(freshNumericId(makeObjectId, () => ++seq, (id) => held.has(id))).toBe(makeObjectId(9))
   })
 })

@@ -40,14 +40,14 @@ const detailOf = (res: { json: () => unknown }): string =>
     '') as string
 
 describe('oauth/access_token requires all three parameters', () => {
-  const complete = { client_id: 'APP_DEFAULT', client_secret: 'secret', code: 'CODE' }
+  const complete = () => ({ client_id: engine.state.defaultAppId, client_secret: 'secret', code: 'CODE' })
 
   it.each([
     ['client_id', 'client_id'],
     ['client_secret', 'client_secret'],
     ['code', 'code'],
   ])('rejects a call missing %s', async (missing) => {
-    const query = { ...complete } as Record<string, string>
+    const query = complete() as Record<string, string>
     delete query[missing]
     const search = new URLSearchParams(query).toString()
 
@@ -62,7 +62,7 @@ describe('oauth/access_token requires all three parameters', () => {
     // written as `code === undefined` would let it through to fail deeper.
     const res = await app.inject({
       method: 'GET',
-      url: '/v19.0/oauth/access_token?client_id=APP_DEFAULT&client_secret=secret&code=',
+      url: `/v19.0/oauth/access_token?client_id=${engine.state.defaultAppId}&client_secret=secret&code=`,
     })
 
     expect(res.statusCode).toBe(400)
@@ -85,7 +85,7 @@ describe('deleting a template requires a name', () => {
   it('rejects a delete with no name, before the name reaches the engine', async () => {
     const res = await app.inject({
       method: 'DELETE',
-      url: '/v19.0/WABA_DEFAULT/message_templates',
+      url: `/v19.0/${engine.state.defaultWabaId}/message_templates`,
     })
 
     expect(res.statusCode).toBe(400)
@@ -100,7 +100,7 @@ describe('deleting a template requires a name', () => {
   it('rejects an empty name', async () => {
     const res = await app.inject({
       method: 'DELETE',
-      url: '/v19.0/WABA_DEFAULT/message_templates?name=',
+      url: `/v19.0/${engine.state.defaultWabaId}/message_templates?name=`,
     })
 
     expect(res.statusCode).toBe(400)
@@ -111,7 +111,7 @@ describe('the version segment is checked, not assumed', () => {
   it.each(['v17.0', 'v19.0', 'v23.0'])('answers on %s', async (version) => {
     const res = await app.inject({
       method: 'POST',
-      url: `/${version}/PNID_DEFAULT/messages`,
+      url: `/${version}/${engine.state.defaultPhoneNumberId}/messages`,
       headers: { 'content-type': 'application/json' },
       payload: JSON.stringify({ messaging_product: 'whatsapp', to: '5215555000001', type: 'text' }),
     })
@@ -124,7 +124,7 @@ describe('the version segment is checked, not assumed', () => {
   it.each(['v19', 'version19.0', '19.0', 'vX.Y'])('refuses %s as a version', async (version) => {
     const res = await app.inject({
       method: 'POST',
-      url: `/${version}/PNID_DEFAULT/messages`,
+      url: `/${version}/${engine.state.defaultPhoneNumberId}/messages`,
       headers: { 'content-type': 'application/json' },
       payload: JSON.stringify({ messaging_product: 'whatsapp', to: '5215555000001', type: 'text' }),
     })

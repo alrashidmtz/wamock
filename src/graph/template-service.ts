@@ -2,6 +2,7 @@ import type { MockContext } from '../core/context.js'
 import { isRecord, textOf } from '../core/values.js'
 import type { PricingCategory } from '../core/pricing.js'
 import { requireWaba } from '../core/guards.js'
+import { freshNumericId } from '../core/ids.js'
 import {
   PARAMETER_FORMATS,
   SUPPORTED_LANGUAGES,
@@ -43,9 +44,7 @@ export interface TemplateListOptions extends PageOptions {
 
 /** A numeric template id no other object holds, so no two records share one. */
 function freshTemplateId(state: MockContext['state']): string {
-  let id = String(state.nextSeq() + 1_000_000_000_000_000)
-  while (state.isIdTaken(id)) id = String(state.nextSeq() + 1_000_000_000_000_000)
-  return id
+  return freshNumericId((seq) => String(seq + 1_000_000_000_000_000), () => state.nextSeq(), (id) => state.isIdTaken(id))
 }
 
 /** Templates per page when the call sets no `limit`. */

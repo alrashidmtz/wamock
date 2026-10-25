@@ -125,7 +125,14 @@ run it (after `build`) whenever a change touches what ships.
   the injected clock.
 - **Determinism.** Ids come from a counter (`state.nextSeq()`), randomness from
   a seeded PRNG; `reset()` rewinds both. Two identical runs must produce
-  identical output.
+  identical output. Graph object ids (portfolio, app, WABA, phone number,
+  media, template) are numeric, as Meta's are: mint them through
+  `freshNumericId` (`src/core/ids.ts`), never a readable prefix like `PNID_`
+  (fixture placeholders are builder inputs, not minted ids). Ids Meta shapes
+  otherwise keep their shape: `wamid.…` messages, `A…` fbtrace ids,
+  country-prefixed BSUIDs. A test that
+  needs a collision learns the next id from a twin engine; hand-picked ids
+  the counter never reaches make it pass vacuously.
 - **Emulate Meta as it runs today.** Verify payload shapes against the current
   reference pages (`developers.facebook.com/documentation/business-messaging/whatsapp/…`,
   each has a `.md` variant that is easy to fetch) before coding them. When the

@@ -144,21 +144,34 @@ describe('the registration routes guard what they touch', () => {
     }
   })
 
+  // Runs repeat, so a twin engine tells which id the next number would get.
+  const nextNumberId = (): string => {
+    const twin = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    const { waba_id: tenant } = twin.createSignup({ phone: 'none' })
+    return twin.createPhoneNumber(tenant, { cc: '52', phone_number: '5512345678', verified_name: 'X' }).id
+  }
+
   it('never mints the id of a number a test already holds', () => {
-    const waba = engine.state.defaultWabaId
-    for (let i = 1; i <= 50; i++) engine.state.registerPhoneNumber({ phoneNumberId: `PNID_${i}`, wabaId: waba, displayPhoneNumber: `52155550${String(i).padStart(5, '0')}` })
-    const { waba_id: tenant } = engine.createSignup({ phone: 'none' })
-    const { id } = engine.createPhoneNumber(tenant, { cc: '52', phone_number: '5512345678', verified_name: 'X' })
-    expect(engine.state.phoneNumber(id)?.wabaId).toBe(tenant)
-    for (let i = 1; i <= 50; i++) expect(engine.state.phoneNumber(`PNID_${i}`)?.wabaId).toBe(waba)
+    const held = nextNumberId()
+    const e = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    e.state.registerPhoneNumber({ phoneNumberId: held, wabaId: e.state.defaultWabaId, displayPhoneNumber: '5215555000099' })
+    const { waba_id: tenant } = e.createSignup({ phone: 'none' })
+    const { id } = e.createPhoneNumber(tenant, { cc: '52', phone_number: '5512345678', verified_name: 'X' })
+    expect(id).toMatch(/^\d{15}$/)
+    expect(id).not.toBe(held)
+    expect(e.state.phoneNumber(id)?.wabaId).toBe(tenant)
+    expect(e.state.phoneNumber(held)?.wabaId).toBe(e.state.defaultWabaId)
   })
 
   it('never mints the id of another kind of object either: Graph ids are one space', () => {
-    const app = engine.state.defaultAppId
-    for (let i = 1; i <= 50; i++) engine.state.registerWaba({ wabaId: `PNID_${i}`, appId: app })
-    const { waba_id: tenant } = engine.createSignup({ phone: 'none' })
-    const { id } = engine.createPhoneNumber(tenant, { cc: '52', phone_number: '5512345678', verified_name: 'X' })
-    expect(engine.state.waba(id)).toBeUndefined()
+    const held = nextNumberId()
+    const e = new WamockEngine({ appSecret: 's', mode: 'frozen', start: EPOCH })
+    e.state.registerWaba({ wabaId: held, appId: e.state.defaultAppId })
+    const { waba_id: tenant } = e.createSignup({ phone: 'none' })
+    const { id } = e.createPhoneNumber(tenant, { cc: '52', phone_number: '5512345678', verified_name: 'X' })
+    expect(id).not.toBe(held)
+    expect(e.state.waba(held)?.appId).toBe(e.state.defaultAppId)
+    expect(e.state.phoneNumber(id)?.wabaId).toBe(tenant)
   })
 
   it('never mints a media id or a template id that another object holds', () => {

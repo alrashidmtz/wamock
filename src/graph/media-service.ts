@@ -1,7 +1,7 @@
 import { createHash, createHmac } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
-import { makeMediaId } from '../core/ids.js'
+import { freshNumericId, makeMediaId } from '../core/ids.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 
 /**
@@ -166,8 +166,7 @@ export class MediaService {
    */
   #freshId(): string {
     const { state } = this.#context
-    let id = makeMediaId(state.nextSeq())
-    while (state.isIdTaken(id) || this.#media.has(id)) id = makeMediaId(state.nextSeq())
+    const id = freshNumericId(makeMediaId, () => state.nextSeq(), (candidate) => state.isIdTaken(candidate) || this.#media.has(candidate))
     state.reserveId(id)
     return id
   }

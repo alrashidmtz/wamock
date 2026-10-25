@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
 import { requirePhoneNumber, requireWaba } from '../core/guards.js'
-import { freshId } from '../core/ids.js'
+import { freshNumericId, makeObjectId } from '../core/ids.js'
 import { includesCallingCode } from '../core/national-lengths.js'
 import { normalizeWaId } from '../core/phone.js'
 import type { PhoneNumber } from '../core/types.js'
@@ -55,7 +55,7 @@ export class RegistrationService {
     // one, the national number lengths decide (see includesCallingCode).
     const full = includesCallingCode(code, digits) ? digits : `${code}${digits}`
     if (normalizeWaId(full) === null) throw invalid()
-    const id = freshId(`PNID_${state.nextSeq()}`, (taken) => state.isIdTaken(taken))
+    const id = freshNumericId(makeObjectId, () => state.nextSeq(), (taken) => state.isIdTaken(taken))
     state.registerPhoneNumber({
       phoneNumberId: id,
       wabaId,

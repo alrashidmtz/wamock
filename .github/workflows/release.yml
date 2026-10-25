@@ -204,14 +204,18 @@ jobs:
             -H 'content-type: application/json' \
             -d '{"from":"5215555000001","text":"hola"}' >/dev/null
 
-          curl -sf -X POST http://127.0.0.1:4004/v19.0/PNID_DEFAULT/messages \
+          # The seeded number's id, read rather than written down.
+          PNID="$(curl -sf http://127.0.0.1:4004/__mock/state \
+            | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).phoneNumbers[0].phoneNumberId))")"
+
+          curl -sf -X POST "http://127.0.0.1:4004/v19.0/$PNID/messages" \
             -H 'content-type: application/json' \
             -d '{"messaging_product":"whatsapp","to":"5215555000001","type":"text","text":{"body":"hi"}}' >/dev/null
 
           curl -sf -X POST http://127.0.0.1:4004/__mock/time/advance \
             -H 'content-type: application/json' -d '{"ms":90000000}' >/dev/null
 
-          CODE="$(curl -s -X POST http://127.0.0.1:4004/v19.0/PNID_DEFAULT/messages \
+          CODE="$(curl -s -X POST "http://127.0.0.1:4004/v19.0/$PNID/messages" \
             -H 'content-type: application/json' \
             -d '{"messaging_product":"whatsapp","to":"5215555000001","type":"text","text":{"body":"x"}}' \
             | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).error.code))")"

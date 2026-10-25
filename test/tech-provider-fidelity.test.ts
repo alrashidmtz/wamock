@@ -125,9 +125,9 @@ describe('business tokens reach only their own customer', () => {
     const verbOf = async (method: 'GET' | 'POST' | 'DELETE') =>
       (await call(method, `/v26.0/${b.waba_id}/subscribed_apps`, a.token, method === 'POST' ? {} : undefined)).json().error
         .message
-    expect(await verbOf('GET')).toMatch(/^Unsupported get request\. Object with ID 'WABA_/)
-    expect(await verbOf('POST')).toMatch(/^Unsupported post request\. Object with ID 'WABA_/)
-    expect(await verbOf('DELETE')).toMatch(/^Unsupported delete request\. Object with ID 'WABA_/)
+    expect(await verbOf('GET')).toMatch(new RegExp(`^Unsupported get request\\. Object with ID '${b.waba_id}'`))
+    expect(await verbOf('POST')).toMatch(new RegExp(`^Unsupported post request\\. Object with ID '${b.waba_id}'`))
+    expect(await verbOf('DELETE')).toMatch(new RegExp(`^Unsupported delete request\\. Object with ID '${b.waba_id}'`))
   })
 
   it('leaves a token wamock did not issue alone, as before', async () => {

@@ -86,7 +86,8 @@ describe('createWamock — the quickstart shape', () => {
     // downloads) must accept what wamock answers, as it accepts Meta's.
     mock = await createWamock({ appSecret: 's', interceptGraph: true })
     await mock.inbound({ from: '5216691112233', image: { bytes: Buffer.from('png bytes'), mime_type: 'image/png' } })
-    const mediaId = JSON.stringify(mock.engine.deliverer.log().at(-1)!.payload).match(/"id":"(\d+)"/)![1]!
+    const payload = mock.engine.deliverer.log().at(-1)!.payload as unknown as { entry: [{ changes: [{ value: { messages: [{ image: { id: string } }] } }] }] }
+    const mediaId = payload.entry[0].changes[0].value.messages[0].image.id
     const media = (await (await fetch(`https://graph.facebook.com/v23.0/${mediaId}`, { headers: { Authorization: 'Bearer T' } })).json()) as { url: string }
     expect(new URL(media.url).host).toBe('lookaside.fbsbx.com')
     const download = await fetch(new Request(media.url, { headers: { Authorization: 'Bearer T' } }))

@@ -4,6 +4,24 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.7.0] — 2026-10-24
+
+From TaskersPro testing 0.6.2.
+
+### Breaking
+
+- **Every Graph object id wamock mints is numeric, as Meta's are.** The seeded objects
+  were `BUSINESS_DEFAULT`, `APP_DEFAULT`, `WABA_DEFAULT` and `PNID_DEFAULT`,
+  Embedded Signup tenants `WABA_TENANT_n`/`PNID_TENANT_n`/`BUSINESS_TENANT_n`,
+  and numbers created on a WABA `PNID_n`. Meta's ids are digit strings, so
+  code that checks an id is all digits passed against Meta and failed
+  against wamock. Portfolio, WABA and number ids are now 15-digit strings;
+  the seeded ones are `200000000000001` (portfolio), `…002` (app), `…003`
+  (WABA) and `…004` (number). Media and template ids were numeric already.
+  A test that wrote one of the old ids should read it from
+  `engine.state.default*` or from the call's response; `phoneNumberId` and
+  `wabaId` still let you choose the seeded ones.
+
 ## [0.6.3] — 2026-10-24
 
 From TaskersPro testing 0.6.2.

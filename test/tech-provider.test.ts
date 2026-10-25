@@ -1,3 +1,4 @@
+import { makeObjectId } from '../src/core/ids.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { WamockEngine } from '../src/core/engine.js'
@@ -587,30 +588,30 @@ describe('messaging limits', () => {
   })
 
   it('never drops a generated tenant into a portfolio someone named on purpose', async () => {
-    // A tenant named BUSINESS_TENANT_2 by hand must not swallow the next
-    // generated tenant whose sequence happens to be 2.
-    const named = engine.createSignup({ businessId: 'BUSINESS_TENANT_2' })
+    // Portfolios named by hand with every id the counter could draw next must
+    // not swallow the generated tenant.
+    const named = [...Array(40).keys()].map((k) => makeObjectId(k + 1))
+    for (const id of named) engine.state.registerBusiness(id)
     const generated = engine.createSignup()
 
-    expect(engine.state.businessIdOf(generated.phone_number_id)).not.toBe(
-      engine.state.businessIdOf(named.phone_number_id),
-    )
+    const portfolio = engine.state.businessIdOf(generated.phone_number_id)
+    expect(portfolio).toMatch(/^\d{15}$/)
+    expect(named).not.toContain(portfolio)
   })
 
-  it('never overwrites a WABA or number registered by hand', async () => {
-    const seq = engine.createSignup().waba_id.replace('WABA_TENANT_', '')
-    const next = Number(seq) + 1
-    engine.state.registerWaba({ wabaId: `WABA_TENANT_${next}`, appId: engine.state.defaultAppId })
-    engine.state.registerPhoneNumber({
-      phoneNumberId: `PNID_TENANT_${next}`,
-      wabaId: `WABA_TENANT_${next}`,
-      displayPhoneNumber: '15559990000',
-    })
+  it('never overwrites a WABA or number registered by hand, and mints numeric ids past them', async () => {
+    const held = [...Array(40).keys()].map((k) => makeObjectId(k + 1))
+    for (const [n, id] of held.entries()) {
+      if (n % 2 === 0) engine.state.registerWaba({ wabaId: id, appId: engine.state.defaultAppId })
+      else engine.state.registerPhoneNumber({ phoneNumberId: id, wabaId: held[n - 1]!, displayPhoneNumber: `1555999${String(n).padStart(4, '0')}` })
+    }
 
     const generated = engine.createSignup()
-    expect(generated.waba_id).not.toBe(`WABA_TENANT_${next}`)
-    expect(generated.phone_number_id).not.toBe(`PNID_TENANT_${next}`)
-    expect(engine.state.phoneNumber(`PNID_TENANT_${next}`)?.displayPhoneNumber).toBe('15559990000')
+    expect(generated.waba_id).toMatch(/^\d{15}$/)
+    expect(generated.phone_number_id).toMatch(/^\d{15}$/)
+    expect(held).not.toContain(generated.waba_id)
+    expect(held).not.toContain(generated.phone_number_id)
+    expect(engine.state.phoneNumber(held[1]!)?.displayPhoneNumber).toBe('15559990001')
   })
 
   it('keeps separate caps for separate portfolios', async () => {

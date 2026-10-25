@@ -31,14 +31,22 @@ export function makeMediaId(seq: number): string {
 }
 
 /**
- * `base`, or `base_2`, `base_3`… if something already claimed it. A generated
- * id must never land on one a test registered by hand: registering it again
- * would overwrite that WABA or number, and a shared portfolio id would make
- * the tenant share someone else's messaging limit.
+ * Portfolio, WABA and phone number ids: 15-digit numeric strings, as Meta's
+ * are. Code that checks an id is all digits must behave the same against
+ * wamock and against Meta.
  */
-export function freshId(base: string, taken: (id: string) => boolean): string {
-  if (!taken(base)) return base
-  let n = 2
-  while (taken(`${base}_${n}`)) n++
-  return `${base}_${n}`
+export function makeObjectId(seq: number): string {
+  return String(100_000_000_000_000n + BigInt(seq))
+}
+
+/**
+ * The first id `make` gives for the counter that nothing holds yet. A
+ * generated id must never land on one a test registered by hand: registering
+ * it again would overwrite that WABA or number, and a shared portfolio id
+ * would make the tenant share someone else's messaging limit.
+ */
+export function freshNumericId(make: (seq: number) => string, next: () => number, taken: (id: string) => boolean): string {
+  let id = make(next())
+  while (taken(id)) id = make(next())
+  return id
 }

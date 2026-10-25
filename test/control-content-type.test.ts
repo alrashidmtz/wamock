@@ -138,7 +138,7 @@ describe('control API accepts a JSON body whatever curl labels it', () => {
 
     const accepted = await app.inject({
       method: 'POST',
-      url: '/v19.0/PNID_DEFAULT/messages',
+      url: `/v19.0/${engine.state.defaultPhoneNumberId}/messages`,
       headers: { 'content-type': 'application/json' },
       payload,
     })
@@ -152,13 +152,13 @@ describe('control API accepts a JSON body whatever curl labels it', () => {
       type: 'text',
       text: JSON.stringify({ body: 'hola' }),
     }).toString()
-    const asForm = await app.inject({ method: 'POST', url: '/v19.0/PNID_DEFAULT/messages', headers: FORM, payload: form })
+    const asForm = await app.inject({ method: 'POST', url: `/v19.0/${engine.state.defaultPhoneNumberId}/messages`, headers: FORM, payload: form })
     expect(asForm.statusCode, 'a form-encoded send must succeed').toBe(200)
 
     // ...while JSON mislabelled as a form is read as a form, finds none of its
     // fields, and fails on them, as it would against Meta. Only the control
     // API reads any body as JSON.
-    const mislabelled = await app.inject({ method: 'POST', url: '/v19.0/PNID_DEFAULT/messages', headers: FORM, payload })
+    const mislabelled = await app.inject({ method: 'POST', url: `/v19.0/${engine.state.defaultPhoneNumberId}/messages`, headers: FORM, payload })
     expect(mislabelled.statusCode).toBe(400)
     expect(mislabelled.json().error.error_data.details).toMatch(/messaging_product/)
   })
