@@ -98,12 +98,10 @@ function pagingQuery(request: FastifyRequest<{ Params: { version: string }; Quer
   version: string
 } {
   const { limit, after, before } = request.query
-  if (limit !== undefined && !(/^\d+$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 100)) {
-    throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param limit must be an integer between 1 and 100' })
-  }
   const baseUrl = publicBase(request)
   return {
-    ...(limit !== undefined ? { limit: Number(limit) } : {}),
+    // Only digits read as a number; anything else reaches the service's check as NaN.
+    ...(limit !== undefined ? { limit: /^\d+$/.test(limit) ? Number(limit) : Number.NaN } : {}),
     ...(after !== undefined ? { after } : {}),
     ...(before !== undefined ? { before } : {}),
     ...(baseUrl !== undefined ? { baseUrl } : {}),
@@ -414,7 +412,6 @@ export function createServer(engine: WamockEngine, options: ServerOptions = {}):
       ...(edge !== undefined ? { edge } : {}),
       method: request.method === 'DELETE' ? 'delete' : request.method === 'POST' ? 'post' : 'get',
     })
-    if (objectId !== undefined) engine.assertNumberUsable(objectId)
   })
 
   app.get<{ Params: { version: string; wabaId: string }; Querystring: Record<string, string> }>(

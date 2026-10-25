@@ -6,7 +6,7 @@ import { CoexistenceService } from '../graph/coexistence-service.js'
 import type { CoexistenceSeed } from '../graph/coexistence-service.js'
 import { MessagingService } from '../graph/messaging-service.js'
 import type { SendMessageResponse, SimulateInboundOptions } from '../graph/messaging-service.js'
-import { TechProviderService, isInMaintenance } from '../graph/tech-provider-service.js'
+import { TechProviderService } from '../graph/tech-provider-service.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 import type { PhoneNumberListOptions, SignupOptions } from '../graph/tech-provider-service.js'
 import { TemplateService } from '../graph/template-service.js'
@@ -605,18 +605,6 @@ export class WamockEngine {
     if (owner !== undefined && owner !== grantedWaba) {
       throw unsupportedRequest(access.method ?? 'get', access.objectId)
     }
-  }
-
-  /**
-   * Meta's throughput page: while a number is upgraded, "the number will not
-   * be usable on our platform. If used in an API request, the API will return
-   * error code 131057". The Graph door calls this for every request on a
-   * number, after its token passed; the control API, which plays Meta, is not
-   * held up.
-   */
-  assertNumberUsable(objectId: string): void {
-    const phoneNumber = this.state.phoneNumber(objectId)
-    if (phoneNumber && isInMaintenance(phoneNumber, this.clock.now())) throw new GraphError(ERROR_CODES.MAINTENANCE_MODE)
   }
 
   /**

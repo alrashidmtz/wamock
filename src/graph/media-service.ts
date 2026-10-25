@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
+import { requireUsablePhoneNumber } from '../core/guards.js'
 import { freshNumericId, makeMediaId } from '../core/ids.js'
 import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
 
@@ -111,9 +112,9 @@ export class MediaService {
 
   /** `POST /{phone_number_id}/media`. */
   upload(phoneNumberId: string, body: Record<string, unknown>): { id: string } {
-    const { clock, state } = this.#context
+    const { clock } = this.#context
 
-    if (!state.phoneNumber(phoneNumberId)) throw unsupportedRequest('post', phoneNumberId)
+    requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     if (body['messaging_product'] !== 'whatsapp') {
       throw invalid("Param messaging_product must be 'whatsapp'")
     }
@@ -241,6 +242,9 @@ export class MediaService {
     if (!media || (phoneNumberId !== undefined && media.phoneNumberId !== phoneNumberId)) {
       throw unsupportedRequest(method, mediaId)
     }
+    // A request that names the number acts on it: mid-upgrade, it is refused
+    // like any other. Without phone_number_id it names only the media.
+    if (phoneNumberId !== undefined) requireUsablePhoneNumber(this.#context, phoneNumberId, method)
     return media
   }
 

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
-import { requirePhoneNumber, requireWaba } from '../core/guards.js'
+import { requirePhoneNumber, requireUsablePhoneNumber, requireWaba } from '../core/guards.js'
 import { freshNumericId, makeObjectId } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
 import { callingCodeOf, countryOf, toGraphDisplayNumber } from '../core/phone.js'
@@ -10,7 +10,7 @@ import { isUnrated } from '../core/types.js'
 import type { ConnectionStatus, MessagingTier, PhoneNumber, QualityRating } from '../core/types.js'
 import { isWebUrl } from '../core/values.js'
 import { pageOf } from './paging.js'
-import { ERROR_CODES, GraphError, unsupportedRequest } from '../errors/graph-error.js'
+import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
 import type { CoexistenceSeed, CoexistenceService } from './coexistence-service.js'
 import { buildAccountUpdatePayload, buildAuthInternationalPayload } from '../webhooks/coexistence-payloads.js'
 import { buildBusinessCapabilityPayload, buildThroughputUpgradePayload } from '../webhooks/tech-payloads.js'
@@ -290,7 +290,7 @@ export class TechProviderService {
     phoneNumberId: string,
     body: Record<string, unknown>,
   ): { url: string; verifyToken: string } | null {
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     // `access_token` is the call's authentication, read by the server, not a setting.
     const others = Object.keys(body).filter((key) => key !== 'webhook_configuration' && key !== 'access_token')
     if (others.length > 0) {
@@ -384,7 +384,7 @@ export class TechProviderService {
     // for this edge, unlike 131059 for templates.
     const fromTop = { defaultLimit: ordered.length, ...(options.limit !== undefined ? { limit: options.limit } : {}) }
     const page = pageOf(ordered, { ...options, ...fromTop }, link) ?? pageOf(ordered, fromTop, link)!
-    const data = page.ids.map((id) => this.getPhoneNumberFields(id, fields))
+    const data = page.ids.map((id) => this.#fieldsOf(this.#context.state.phoneNumber(id)!, fields))
     return page.paging ? { data, paging: page.paging } : { data }
   }
 
@@ -472,8 +472,15 @@ export class TechProviderService {
 
   /** `GET /{version}/{phone_number_id}?fields=…`. Only requested fields come back. */
   getPhoneNumberFields(phoneNumberId: string, fields: string[]): Record<string, unknown> {
-    const phoneNumber = this.#context.state.phoneNumber(phoneNumberId)
-    if (!phoneNumber) throw unsupportedRequest('get', phoneNumberId)
+    return this.#fieldsOf(requireUsablePhoneNumber(this.#context, phoneNumberId, 'get'), fields)
+  }
+
+  /**
+   * A number's fields. Listed on its WABA, a number mid-upgrade still reads:
+   * the request names the WABA, not the number.
+   */
+  #fieldsOf(phoneNumber: PhoneNumber, fields: string[]): Record<string, unknown> {
+    const phoneNumberId = phoneNumber.phoneNumberId
 
     const limit = this.#context.state.business(this.#context.state.businessIdOf(phoneNumberId) ?? '')
       ?.messagingTier ?? 'TIER_UNLIMITED'
@@ -613,7 +620,3 @@ export class TechProviderService {
 
 /** "The upgrade process itself can take up to 1 minute." */
 const THROUGHPUT_UPGRADE_MS = 60 * 1000
-
-/** Whether a number is mid-upgrade, answering 131057 to API requests. */
-export const isInMaintenance = (phoneNumber: PhoneNumber, nowMs: number): boolean =>
-  phoneNumber.upgradedAt !== undefined && nowMs < phoneNumber.upgradedAt

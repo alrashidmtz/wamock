@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 
 import type { MockContext } from '../core/context.js'
-import { requirePhoneNumber, requireWaba } from '../core/guards.js'
+import { requireUsablePhoneNumber, requireWaba } from '../core/guards.js'
 import { freshNumericId, makeObjectId } from '../core/ids.js'
 import { includesCallingCode } from '../core/national-lengths.js'
 import { normalizeWaId } from '../core/phone.js'
@@ -73,7 +73,7 @@ export class RegistrationService {
    * a person would read the SMS.
    */
   requestCode(phoneNumberId: string, query: Record<string, unknown>): { success: true } {
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     if (query['code_method'] !== 'SMS' && query['code_method'] !== 'VOICE') {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param code_method must be one of {SMS, VOICE}' })
     }
@@ -98,7 +98,7 @@ export class RegistrationService {
    * entry for a wrong code; wamock answers Graph's generic invalid parameter.
    */
   verifyCode(phoneNumberId: string, query: Record<string, unknown>): { success: true } {
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     const sent = this.#codes.get(phoneNumberId)
     const code = query['code']
     if (typeof code !== 'string' || code === '') {
@@ -119,7 +119,7 @@ export class RegistrationService {
    * two-step verification PIN the first time, and must match it after.
    */
   register(phoneNumberId: string, body: Record<string, unknown>): { success: true } {
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     if (body['messaging_product'] !== 'whatsapp') {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: "Param messaging_product must be 'whatsapp'" })
     }
@@ -136,7 +136,7 @@ export class RegistrationService {
 
   /** `POST /{phone_number_id}/deregister`: off Cloud API until registered again. */
   deregister(phoneNumberId: string): { success: true } {
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     this.#countAttempt(phoneNumberId)
     this.#update(phoneNumber, { registered: false })
     return { success: true }

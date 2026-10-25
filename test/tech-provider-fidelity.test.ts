@@ -642,6 +642,25 @@ describe('reading phone numbers', () => {
     expect((await call('GET', `/v26.0/${waba}/phone_numbers?limit=1`)).statusCode).toBe(200)
   })
 
+  it('holds the library to the same limit on every listing, not only HTTP', () => {
+    const waba = engine.state.defaultWabaId
+    const pnid = engine.state.defaultPhoneNumberId
+    const listings = {
+      phone_numbers: (limit: number) => engine.listPhoneNumbers(waba, { limit }),
+      message_templates: (limit: number) => engine.listTemplates(waba, { limit }),
+      block_users: (limit: number) => engine.listBlockedUsers(pnid, { limit }),
+    }
+    for (const [edge, list] of Object.entries(listings)) {
+      for (const limit of [0, 101, 1.5, -3, Number.NaN]) {
+        expect(() => list(limit), `${edge} ${limit}`).toThrow(
+          expect.objectContaining({ code: 100, details: 'Param limit must be an integer between 1 and 100' }),
+        )
+      }
+      expect(() => list(1), edge).not.toThrow()
+      expect(() => list(100), edge).not.toThrow()
+    }
+  })
+
   it('takes only a whole number as the limit', async () => {
     const waba = engine.state.defaultWabaId
     for (const limit of ['1.5', '1e1', 'x5', '5x']) {

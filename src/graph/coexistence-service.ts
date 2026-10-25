@@ -1,5 +1,5 @@
 import type { MockContext } from '../core/context.js'
-import { requirePhoneNumber } from '../core/guards.js'
+import { requirePhoneNumber, requireUsablePhoneNumber } from '../core/guards.js'
 import { userIdentity } from '../core/identity.js'
 import { makeWamid } from '../core/ids.js'
 import { normalizeWaId } from '../core/phone.js'
@@ -152,6 +152,7 @@ export class CoexistenceService {
   /** `POST /{phone_number_id}/smb_app_data`. */
   sync(phoneNumberId: string, body: Record<string, unknown>): { messaging_product: 'whatsapp'; request_id: string } {
     const { clock, state } = this.#context
+    requireUsablePhoneNumber(this.#context, phoneNumberId)
     const entry = this.#requireCoexistence(phoneNumberId)
 
     if (body['messaging_product'] !== 'whatsapp') {

@@ -1,7 +1,7 @@
 import type { MockContext } from '../core/context.js'
 import { isAuthInternational } from '../core/pricing.js'
 import type { EntryPointWindow, PricingCategory } from '../core/pricing.js'
-import { assertToken, requirePhoneNumber } from '../core/guards.js'
+import { assertToken, requirePhoneNumber, requireUsablePhoneNumber } from '../core/guards.js'
 import { userIdentity } from '../core/identity.js'
 import { makeWamid } from '../core/ids.js'
 import { TIER_CAPS } from '../core/limits.js'
@@ -17,7 +17,6 @@ import type { InboundContent, MessageStatus, UserIdentity } from '../webhooks/pa
 import { validateInteractive } from './interactive.js'
 import type { BlockService } from './block-service.js'
 import { isRegistered } from './registration-service.js'
-import { isInMaintenance } from './tech-provider-service.js'
 import type { CoexistenceService } from './coexistence-service.js'
 import { MIME_TYPES_BY_KIND } from './media-service.js'
 import type { MediaService } from './media-service.js'
@@ -146,7 +145,7 @@ export class MessagingService {
     const { clock, state, scenario, windows, limits, users, dispatcher } = this.#context
 
     assertToken(this.#context, accessToken)
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId)
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId)
     // Embedded Signup verifies a number but leaves registering it to the
     // partner: until `register`, every send fails, as with Meta.
     if (!isRegistered(phoneNumber)) {
@@ -154,8 +153,6 @@ export class MessagingService {
         details: `Register ${phoneNumberId} (POST /{phone_number_id}/register) before sending from it`,
       })
     }
-    // "During this time the number will not be usable": a throughput upgrade.
-    if (isInMaintenance(phoneNumber, clock.now())) throw new GraphError(ERROR_CODES.MAINTENANCE_MODE)
 
     const { type, rawTo, recipient } = this.#validateEnvelope(body)
     this.#validateTypePayload(type, body)
@@ -495,8 +492,7 @@ export class MessagingService {
     const { clock, state } = this.#context
 
     assertToken(this.#context, accessToken)
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId)
-    if (isInMaintenance(phoneNumber, clock.now())) throw new GraphError(ERROR_CODES.MAINTENANCE_MODE)
+    requireUsablePhoneNumber(this.#context, phoneNumberId)
 
     if (body['messaging_product'] !== 'whatsapp') {
       throw new GraphError(ERROR_CODES.INVALID_PARAMETER, {

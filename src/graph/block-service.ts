@@ -1,5 +1,5 @@
 import type { MockContext } from '../core/context.js'
-import { requirePhoneNumber } from '../core/guards.js'
+import { requireUsablePhoneNumber } from '../core/guards.js'
 import { normalizeWaId } from '../core/phone.js'
 import { isRecord } from '../core/values.js'
 import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
@@ -68,7 +68,7 @@ export class BlockService {
 
   /** `POST /{phone_number_id}/block_users`. */
   block(phoneNumberId: string, body: Record<string, unknown>): Record<string, unknown> {
-    const phoneNumber = requirePhoneNumber(this.#context, phoneNumberId, 'post')
+    const phoneNumber = requireUsablePhoneNumber(this.#context, phoneNumberId, 'post')
     const users = this.#users(body)
     const { clock, windows } = this.#context
     const blocked = this.#blocked.get(phoneNumberId) ?? new Set<string>()
@@ -102,7 +102,7 @@ export class BlockService {
    * every block permanent. An inference: the page does not say.
    */
   unblock(phoneNumberId: string, body: Record<string, unknown>): Record<string, unknown> {
-    requirePhoneNumber(this.#context, phoneNumberId, 'delete')
+    requireUsablePhoneNumber(this.#context, phoneNumberId, 'delete')
     const users = this.#users(body)
     const blocked = this.#blocked.get(phoneNumberId)
     const removed: UserResult[] = []
@@ -125,7 +125,7 @@ export class BlockService {
    * changed answers Meta's 139102, "Blocklist concurrent update".
    */
   list(phoneNumberId: string, options: BlockListOptions = {}): { data: unknown[]; paging?: Record<string, unknown> } {
-    requirePhoneNumber(this.#context, phoneNumberId, 'get')
+    requireUsablePhoneNumber(this.#context, phoneNumberId, 'get')
     const version = this.#versions.get(phoneNumberId) ?? 0
     const ordered = [...(this.#blocked.get(phoneNumberId) ?? [])].map((waId) => `${version}|${waId}`)
     const link = (param: 'after' | 'before', cursor: string) => {

@@ -4,6 +4,29 @@ All notable changes to this project are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning is
 [semver](https://semver.org/).
 
+## [0.7.1] — 2026-10-25
+
+From a review of 0.7.0 with Codex.
+
+### Fixed
+
+- **A number mid throughput upgrade answers `131057` through the library
+  too.** The check lived in the HTTP door only, so the engine's helpers
+  (`uploadMedia`, `blockUsers`, `deregisterPhoneNumber`,
+  `getPhoneNumberFields`…) went through and changed the number, and a test
+  driving them passed a flow Meta refuses. Every Graph operation on a number
+  now resolves it through one guard, after its token is checked, whichever
+  door the call came through. A media request that names the number
+  (`GET`/`DELETE /{media_id}?phone_number_id=`) is refused too; one that
+  names only the media is not. A send from a number that is both unregistered
+  and mid-upgrade now answers `131057` in the library, as it already did over
+  HTTP.
+- **The library is held to Graph's `limit` of 1 to 100.** Only the HTTP door
+  checked it, so `listPhoneNumbers`, `listTemplates` and `listBlockedUsers`
+  took `0`, `101` or `1.5` and answered a page Meta refuses. The check now
+  runs in the listing itself, for both doors, after the object the call
+  names was found usable.
+
 ## [0.7.0] — 2026-10-24
 
 From TaskersPro testing 0.6.2.

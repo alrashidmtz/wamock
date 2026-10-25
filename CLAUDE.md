@@ -71,7 +71,11 @@ run it (after `build`) whenever a change touches what ships.
   deliberately not pre-flushed. A Graph `preHandler` checks every
   wamock-issued token through `engine.assertAccessToken()`: validity, the
   permission the edge needs, and that a business token owns the object
-  (otherwise `unsupportedRequest()`, Graph's code 100/subcode 33). Every error
+  (otherwise `unsupportedRequest()`, Graph's code 100/subcode 33). Rules that
+  hold whichever door a call came through live in the services, not here: a
+  Graph operation on a number resolves it with `requireUsablePhoneNumber()`
+  (`src/core/guards.ts`, `131057` mid throughput upgrade), the control API
+  with `requirePhoneNumber()`. Every error
   leaves as a Meta-shaped body via
   `GraphError` (`src/errors/graph-error.ts`, the error catalogue).
 - **`src/control/routes.ts`** — the `/__mock/*` control API. Bodies are parsed

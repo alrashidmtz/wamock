@@ -1,3 +1,5 @@
+import { ERROR_CODES, GraphError } from '../errors/graph-error.js'
+
 /** Opaque, like Meta's cursors; wamock's just encode the record id. */
 export const toCursor = (id: string): string => Buffer.from(id).toString('base64url')
 export const fromCursor = (cursor: string): string => Buffer.from(cursor, 'base64url').toString()
@@ -28,6 +30,12 @@ export function pageOf(
   options: PageOptions & { defaultLimit: number },
   link: (param: 'after' | 'before', cursor: string) => string,
 ): Page | undefined {
+  // Checked here, in the service, rather than where HTTP parses the query: a
+  // call through the library is held to it too, and only after the object
+  // the call names was found usable.
+  if (options.limit !== undefined && !(Number.isInteger(options.limit) && options.limit >= 1 && options.limit <= 100)) {
+    throw new GraphError(ERROR_CODES.INVALID_PARAMETER, { details: 'Param limit must be an integer between 1 and 100' })
+  }
   const at = (cursor: string | undefined) => (cursor === undefined ? -1 : ordered.indexOf(fromCursor(cursor)))
   if ((options.after !== undefined && at(options.after) < 0) || (options.before !== undefined && at(options.before) < 0)) {
     return undefined

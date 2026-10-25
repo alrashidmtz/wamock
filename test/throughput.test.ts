@@ -9,6 +9,9 @@ import { createServer } from '../src/server.js'
  * number is upgraded from 80 to 1,000 messages per second, is not usable for
  * up to a minute meanwhile (131057), and `phone_number_quality_update`
  * announces the upgrade once it is done.
+ *
+ * Stryker's survivor on `isInMaintenance` (`upgradedAt !== undefined` →
+ * `true`) is equivalent: `now < undefined` is false either way.
  */
 
 const EPOCH = 1_750_000_000_000
@@ -28,7 +31,10 @@ function harness() {
     throw new Error('expected a GraphError')
   }
   const text = () => e.sendMessage(pnid, { messaging_product: 'whatsapp', to: CUSTOMER, type: 'text', text: { body: 'x' } })
-  const level = () => (e.getPhoneNumberFields(pnid, ['throughput'])['throughput'] as { level: string }).level
+  // Read through the WABA's listing, which a number mid-upgrade does not hold up.
+  const level = () =>
+    ((e.listPhoneNumbers(e.state.defaultWabaId, { fields: ['id', 'throughput'] }).data as Array<Record<string, unknown>>)
+      .find((n) => n['id'] === pnid)!['throughput'] as { level: string }).level
   const qualityUpdates = () =>
     bodies.map((b) => JSON.parse(b).entry[0]).filter((entry) => entry.changes[0].field === 'phone_number_quality_update')
   return { e, pnid, codeOf, text, level, qualityUpdates }
@@ -42,6 +48,7 @@ describe('a throughput upgrade', () => {
 
     e.upgradeThroughput(pnid)
     expect(codeOf(text)).toBe(131057)
+    expect(codeOf(() => e.getPhoneNumberFields(pnid, ['throughput']))).toBe(131057)
     expect(codeOf(() => e.postMessages(pnid, { messaging_product: 'whatsapp', status: 'read', message_id: messageId }))).toBe(131057)
     expect(level()).toBe('STANDARD')
 
@@ -97,11 +104,21 @@ describe('a throughput upgrade', () => {
     const app = createServer(e)
     await app.ready()
     try {
+      const media = e.uploadMedia(pnid, { messaging_product: 'whatsapp', type: 'image/png', file: { bytes: Buffer.from('x') } }).id
       e.upgradeThroughput(pnid)
       const calls = [
+        { method: 'POST', url: `/v26.0/${pnid}/request_code?code_method=SMS&language=en_US`, payload: {} },
+        { method: 'POST', url: `/v26.0/${pnid}/verify_code?code=123456`, payload: {} },
+        { method: 'POST', url: `/v26.0/${pnid}/smb_app_data`, payload: { messaging_product: 'whatsapp', sync_type: 'history' } },
+        { method: 'POST', url: `/v26.0/${pnid}/messages`, payload: { messaging_product: 'whatsapp', status: 'read', message_id: 'wamid.X' } },
+        // A media request that names the number acts on it.
+        { method: 'GET', url: `/v26.0/${media}?phone_number_id=${pnid}` },
+        { method: 'DELETE', url: `/v26.0/${media}?phone_number_id=${pnid}` },
         { method: 'GET', url: `/v26.0/${pnid}?fields=throughput` },
         { method: 'POST', url: `/v26.0/${pnid}`, payload: { webhook_configuration: { override_callback_uri: 'https://example.com/hook', verify_token: 't' } } },
         { method: 'GET', url: `/v26.0/${pnid}/block_users` },
+        // The upgrade is told before a malformed query is.
+        { method: 'GET', url: `/v26.0/${pnid}/block_users?limit=0` },
         { method: 'POST', url: `/v26.0/${pnid}/block_users`, payload: { messaging_product: 'whatsapp', block_users: [{ user: CUSTOMER }] } },
         { method: 'POST', url: `/v26.0/${pnid}/deregister`, payload: {} },
         { method: 'POST', url: `/v26.0/${pnid}/register`, payload: { messaging_product: 'whatsapp', pin: '123456' } },
@@ -116,17 +133,52 @@ describe('a throughput upgrade', () => {
       expect(number.registered).not.toBe(false)
       expect(number.callbackOverride).toBeUndefined()
       expect(e.state.outbound()).toEqual([])
-      expect(e.listBlockedUsers(pnid, {}).data).toEqual([])
+      expect(e.getMedia(media)['id']).toBe(media)
 
-      // The WABA is not the number, and the control API plays Meta.
+      // The WABA is not the number, nor is a media id alone; the control API plays Meta.
       expect((await app.inject({ method: 'GET', url: `/v26.0/${e.state.defaultWabaId}/phone_numbers` })).statusCode).toBe(200)
+      expect((await app.inject({ method: 'GET', url: `/v26.0/${media}` })).statusCode).toBe(200)
       expect((await app.inject({ method: 'POST', url: '/__mock/quality', payload: JSON.stringify({ quality_rating: 'GREEN' }) })).statusCode).toBe(200)
 
       e.clock.advance(60_000)
+      expect(e.listBlockedUsers(pnid).data).toEqual([])
       expect((await app.inject({ method: 'GET', url: `/v26.0/${pnid}?fields=throughput` })).json().throughput).toEqual({ level: 'HIGH' })
     } finally {
       await app.close()
     }
+  })
+
+  it('answers 131057 the same through the engine’s helpers, which the library and HTTP share, changing nothing', async () => {
+    const { e, pnid, codeOf } = harness()
+    const media = e.uploadMedia(pnid, { messaging_product: 'whatsapp', type: 'image/png', file: { bytes: Buffer.from('x') } }).id
+    e.upgradeThroughput(pnid)
+    const helpers: Record<string, () => unknown> = {
+      uploadMedia: () => e.uploadMedia(pnid, { messaging_product: 'whatsapp', type: 'image/png', file: { bytes: Buffer.from('y') } }),
+      getMedia: () => e.getMedia(media, { phoneNumberId: pnid }),
+      deleteMedia: () => e.deleteMedia(media, { phoneNumberId: pnid }),
+      requestVerificationCode: () => e.requestVerificationCode(pnid, { code_method: 'SMS', language: 'en_US' }),
+      verifyCode: () => e.verifyCode(pnid, { code: '123456' }),
+      registerPhoneNumber: () => e.registerPhoneNumber(pnid, { messaging_product: 'whatsapp', pin: '123456' }),
+      deregisterPhoneNumber: () => e.deregisterPhoneNumber(pnid),
+      blockUsers: () => e.blockUsers(pnid, { messaging_product: 'whatsapp', block_users: [{ user: CUSTOMER }] }),
+      unblockUsers: () => e.unblockUsers(pnid, { messaging_product: 'whatsapp', block_users: [{ user: CUSTOMER }] }),
+      listBlockedUsers: () => e.listBlockedUsers(pnid),
+      listBlockedUsersBadLimit: () => e.listBlockedUsers(pnid, { limit: 0 }),
+      getPhoneNumberFields: () => e.getPhoneNumberFields(pnid, ['id']),
+      syncBusinessAppData: () => e.syncBusinessAppData(pnid, { messaging_product: 'whatsapp', sync_type: 'history' }),
+    }
+    for (const [name, call] of Object.entries(helpers)) expect(codeOf(call), name).toBe(131057)
+    await expect(
+      e.configurePhoneNumber(pnid, { webhook_configuration: { override_callback_uri: 'https://example.com/hook', verify_token: 't' } }),
+    ).rejects.toMatchObject({ code: 131057 })
+
+    const number = e.state.phoneNumber(pnid)!
+    expect(number.registered).not.toBe(false)
+    expect(number.callbackOverride).toBeUndefined()
+    expect(e.getMedia(media)['id']).toBe(media)
+    e.clock.advance(60_000)
+    expect(e.listBlockedUsers(pnid).data).toEqual([])
+    expect(e.getMedia(media, { phoneNumberId: pnid })['id']).toBe(media)
   })
 
   it('is played through POST /__mock/throughput-upgrade', async () => {

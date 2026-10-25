@@ -25,6 +25,28 @@ export function requirePhoneNumber(
   return phoneNumber
 }
 
+/** Whether a number is mid throughput upgrade, answering 131057 to API requests. */
+export const isInMaintenance = (phoneNumber: PhoneNumber, nowMs: number): boolean =>
+  phoneNumber.upgradedAt !== undefined && nowMs < phoneNumber.upgradedAt
+
+/**
+ * The number a Graph request acts on. Meta's throughput page: while a number
+ * is upgraded, "the number will not be usable on our platform. If used in an
+ * API request, the API will return error code 131057". Every Graph operation
+ * on a number resolves it here, after its token passed, so the library and
+ * HTTP doors refuse the same calls; the control API, which plays Meta, uses
+ * `requirePhoneNumber` and is not held up.
+ */
+export function requireUsablePhoneNumber(
+  context: MockContext,
+  phoneNumberId: string,
+  method: 'get' | 'post' | 'delete' = 'post',
+): PhoneNumber {
+  const phoneNumber = requirePhoneNumber(context, phoneNumberId, method)
+  if (isInMaintenance(phoneNumber, context.clock.now())) throw new GraphError(ERROR_CODES.MAINTENANCE_MODE)
+  return phoneNumber
+}
+
 /**
  * Validate a bearer token — but only one wamock itself issued.
  *

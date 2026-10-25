@@ -612,7 +612,8 @@ downgrade waits forever. Poll `?fields=quality_rating,status` instead;
 `POST /__mock/quality` and `POST /__mock/phone-status` change what it reads.
 `POST /__mock/throughput-upgrade` plays Meta upgrading a number to 1,000
 messages per second: every Graph request on the number answers `131057` for
-the minute the upgrade takes,
+the minute the upgrade takes (the library's helpers too, and a media request
+that names the number with `phone_number_id`),
 then sends `THROUGHPUT_UPGRADE`, and `?fields=throughput` reads `HIGH` (the
 level Meta documents is `STANDARD`; `HIGH` is what third-party guides report).
 
